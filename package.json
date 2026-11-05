@@ -1,0 +1,41 @@
+{
+  "name": "kaxcav-vortex",
+  "version": "2.0.0",
+  "description": "Kaxcav Vortex (kvx) — High-Performance Multi-Repo Code Intelligence, CSR Graph, Submodular L0-L3 Context Engine & MCP Server",
+  "type": "module",
+  "author": "Kaxcav",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kaxcav/kaxcav-vortex.git"
+  },
+  "homepage": "https://github.com/Kaxcav/kaxcav-vortex#readme",
+  "bugs": {
+    "url": "https://github.com/Kaxcav/kaxcav-vortex/issues"
+  },
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "context-engine",
+    "pagerank",
+    "csr-graph",
+    "ast",
+    "multi-repo",
+    "sqlite",
+    "ai-agents",
+    "kaxcav"
+  ],
+  "bin": {
+    "kvx": "./bin/kvx.mjs"
+  },
+  "scripts": {
+    "kvx": "node --experimental-strip-types ./src/cli/main.ts",
+    "dashboard": "node --experimental-strip-types ./src/cli/main.ts dashboard --port 7788",
+    "mcp": "node --experimental-strip-types --no-warnings ./src/cli/main.ts serve --mcp",
+    "test": "node --test --experimental-strip-types ./test/*.test.ts",
+    "bench": "node --experimental-strip-types ./src/cli/main.ts bench"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

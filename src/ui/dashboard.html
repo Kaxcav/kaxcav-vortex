@@ -1,0 +1,1648 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kaxcav Vortex v2.0-apex : Multi-Repo Code Intelligence Workbench</title>
+  <style>
+    :root {
+      --bg-canvas: oklch(0.125 0.006 250);
+      --bg-rail: oklch(0.145 0.007 250);
+      --bg-panel: oklch(0.162 0.008 250);
+      --bg-elevated: oklch(0.192 0.010 250);
+      --bg-hover: oklch(0.215 0.012 250);
+      --bg-code: oklch(0.112 0.005 250);
+
+      --border-hairline: oklch(0.235 0.009 250);
+      --border-strong: oklch(0.320 0.012 250);
+      --border-focus: oklch(0.850 0.005 250);
+
+      --ink-primary: oklch(0.955 0.004 250);
+      --ink-secondary: oklch(0.770 0.008 250);
+      --ink-muted: oklch(0.615 0.010 250);
+
+      --accent: oklch(0.715 0.168 42);
+      --accent-hover: oklch(0.755 0.168 42);
+      --accent-surface: oklch(0.225 0.045 42);
+      --accent-border: oklch(0.420 0.095 42);
+
+      --l3-focal: oklch(0.715 0.168 42);
+      --l2-contract: oklch(0.730 0.125 235);
+      --l1-skeleton: oklch(0.720 0.115 170);
+      --l0-delta: oklch(0.710 0.130 300);
+      --danger: oklch(0.660 0.190 25);
+
+      --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+      --z-header: 20;
+      --z-drawer: 30;
+      --z-modal: 50;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-canvas);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    .mono, code, pre, .tabular {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* App Shell */
+    .workbench {
+      display: grid;
+      grid-template-rows: 48px 1fr 28px;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* Top Bar */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      background: var(--bg-rail);
+      border-bottom: 1px solid var(--border-hairline);
+      z-index: var(--z-header);
+      gap: 12px;
+    }
+
+    .brand-cluster {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 240px;
+    }
+
+    .brand-mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      background: var(--accent-surface);
+      border: 1px solid var(--accent-border);
+      border-radius: 5px;
+      color: var(--accent);
+    }
+
+    .brand-name {
+      font-size: 0.875rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--ink-primary);
+    }
+
+    .version-tag {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-hairline);
+      color: var(--ink-secondary);
+    }
+
+    .nav-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .nav-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 32px;
+      padding: 0 11px;
+      border-radius: 5px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink-secondary);
+      font-family: var(--font-sans);
+      font-size: 0.8125rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+    }
+
+    .nav-tab:hover {
+      background: var(--bg-hover);
+      color: var(--ink-primary);
+    }
+
+    .nav-tab.active {
+      background: var(--bg-elevated);
+      border-color: var(--border-strong);
+      color: var(--ink-primary);
+    }
+
+    .nav-tab.active svg {
+      color: var(--accent);
+    }
+
+    .topbar-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .repo-select {
+      height: 30px;
+      padding: 0 10px;
+      border-radius: 5px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+      color: var(--ink-primary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .repo-select:focus {
+      border-color: var(--border-focus);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 11px;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-elevated);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      font-size: 0.8125rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 150ms ease, border-color 150ms ease;
+      white-space: nowrap;
+    }
+
+    .btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .btn:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 1px;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: oklch(0.12 0.01 250);
+      font-weight: 600;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    /* 3-Column Body */
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: 270px 1fr 350px;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* Left File Explorer */
+    .sidebar-left {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-rail);
+      border-right: 1px solid var(--border-hairline);
+      overflow: hidden;
+    }
+
+    .pane-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 36px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border-hairline);
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--ink-secondary);
+    }
+
+    .filter-box {
+      padding: 8px;
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .input-control {
+      width: 100%;
+      height: 30px;
+      padding: 0 9px;
+      border-radius: 4px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-hairline);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      font-size: 0.8125rem;
+      outline: none;
+    }
+
+    .input-control:focus {
+      border-color: var(--border-focus);
+    }
+
+    .file-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-align: left;
+      cursor: pointer;
+      gap: 6px;
+    }
+
+    .file-item:hover {
+      background: var(--bg-hover);
+      color: var(--ink-primary);
+    }
+
+    .file-item.selected {
+      background: var(--accent-surface);
+      border-color: var(--accent-border);
+      color: var(--ink-primary);
+    }
+
+    .file-path-trunc {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .file-meta-pill {
+      font-size: 0.6875rem;
+      color: var(--ink-muted);
+      flex-shrink: 0;
+    }
+
+    .hub-tag {
+      font-size: 0.65rem;
+      padding: 0 4px;
+      border-radius: 3px;
+      border: 1px solid var(--border-strong);
+      color: var(--ink-secondary);
+    }
+
+    /* Center Stage */
+    .stage-center {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-canvas);
+      overflow: hidden;
+    }
+
+    .tab-panel {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .tab-panel.active {
+      display: flex;
+    }
+
+    /* Query Workbench Bar */
+    .query-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .query-row-main {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .query-input {
+      flex: 1;
+      height: 34px;
+      padding: 0 12px;
+      border-radius: 5px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-strong);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      outline: none;
+    }
+
+    .query-input:focus {
+      border-color: var(--border-focus);
+    }
+
+    .query-row-options {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 0.75rem;
+      color: var(--ink-secondary);
+    }
+
+    .option-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-hairline);
+      border-radius: 4px;
+      padding: 2px;
+    }
+
+    .segmented button {
+      border: none;
+      background: transparent;
+      color: var(--ink-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .segmented button.active {
+      background: var(--bg-elevated);
+      color: var(--ink-primary);
+      font-weight: 600;
+    }
+
+    .preset-chips {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .preset-chip {
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-hairline);
+      color: var(--ink-secondary);
+      cursor: pointer;
+    }
+
+    .preset-chip:hover {
+      border-color: var(--border-strong);
+      color: var(--ink-primary);
+    }
+
+    /* Token Allocation Meter */
+    .allocation-strip {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px 16px;
+      background: var(--bg-rail);
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .allocation-stats {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: var(--ink-secondary);
+    }
+
+    .meter-track {
+      display: flex;
+      height: 6px;
+      width: 100%;
+      background: var(--bg-canvas);
+      border-radius: 3px;
+      overflow: hidden;
+      gap: 1px;
+    }
+
+    .meter-seg-l3 { background: var(--l3-focal); }
+    .meter-seg-l2 { background: var(--l2-contract); }
+    .meter-seg-l1 { background: var(--l1-skeleton); }
+    .meter-seg-l0 { background: var(--l0-delta); }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--ink-muted);
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .legend-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+    }
+
+    /* Slices Stream */
+    .slices-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .slice-block {
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      background: var(--bg-panel);
+      overflow: hidden;
+    }
+
+    .slice-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 12px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border-hairline);
+      gap: 8px;
+    }
+
+    .slice-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--ink-primary);
+      overflow: hidden;
+    }
+
+    .fidelity-badge {
+      font-family: var(--font-mono);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--border-strong);
+    }
+
+    .fidelity-L3_FOCAL {
+      color: var(--l3-focal);
+      border-color: var(--accent-border);
+      background: var(--accent-surface);
+    }
+
+    .fidelity-L2_CONTRACT {
+      color: var(--l2-contract);
+      background: oklch(0.20 0.03 235);
+      border-color: oklch(0.35 0.06 235);
+    }
+
+    .fidelity-L1_SKELETON {
+      color: var(--l1-skeleton);
+      background: oklch(0.20 0.03 170);
+      border-color: oklch(0.35 0.06 170);
+    }
+
+    .fidelity-L0_DELTA {
+      color: var(--l0-delta);
+      background: oklch(0.20 0.03 300);
+      border-color: oklch(0.35 0.06 300);
+    }
+
+    .slice-code {
+      padding: 10px 12px;
+      background: var(--bg-code);
+      color: var(--ink-primary);
+      font-family: var(--font-mono);
+      font-size: 0.775rem;
+      line-height: 1.5;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* Topology Canvas */
+    .canvas-stage {
+      position: relative;
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      background: var(--bg-canvas);
+      overflow: hidden;
+    }
+
+    #topologyCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    #topologyCanvas:active {
+      cursor: grabbing;
+    }
+
+    .canvas-hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 5px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--ink-secondary);
+    }
+
+    /* Tables & Reports */
+    .report-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .panel-box {
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      background: var(--bg-panel);
+      overflow: hidden;
+    }
+
+    .panel-box-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border-hairline);
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 7px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .data-table th {
+      color: var(--ink-secondary);
+      font-weight: 600;
+      background: var(--bg-rail);
+      font-size: 0.72rem;
+    }
+
+    .data-table tr:hover td {
+      background: var(--bg-hover);
+    }
+
+    /* Right Inspector */
+    .sidebar-right {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-rail);
+      border-left: 1px solid var(--border-hairline);
+      overflow: hidden;
+    }
+
+    .inspector-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sym-card {
+      padding: 8px 10px;
+      border-radius: 5px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      cursor: pointer;
+    }
+
+    .sym-card:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-elevated);
+    }
+
+    .sym-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--ink-primary);
+    }
+
+    .sym-sig {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--ink-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Status Footer */
+    .statusbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      background: var(--bg-rail);
+      border-top: 1px solid var(--border-hairline);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--ink-secondary);
+    }
+
+    .status-cluster {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    @media (max-width: 1180px) {
+      .workspace-grid {
+        grid-template-columns: 220px 1fr 280px;
+      }
+    }
+
+    @media (max-width: 900px) {
+      .workspace-grid {
+        grid-template-columns: 1fr;
+      }
+      .sidebar-left, .sidebar-right {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="workbench">
+    <!-- Top Command Bar -->
+    <header class="topbar">
+      <div class="brand-cluster">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+          </svg>
+        </span>
+        <span class="brand-name">Kaxcav Vortex</span>
+        <span class="version-tag" id="engineVersionTag">v2.0.0-apex</span>
+      </div>
+
+      <nav class="nav-tabs" role="tablist">
+        <button class="nav-tab active" data-tab="context" role="tab">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          Context Workbench
+        </button>
+        <button class="nav-tab" data-tab="topology" role="tab">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          CSR Topology Graph
+        </button>
+        <button class="nav-tab" data-tab="impact" role="tab">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Blast Radius &amp; Drift
+        </button>
+        <button class="nav-tab" data-tab="telemetry" role="tab">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          Shards &amp; Telemetry
+        </button>
+      </nav>
+
+      <div class="topbar-controls">
+        <select id="repoSelector" class="repo-select" aria-label="Selecionar repositório"></select>
+        <input
+          type="text"
+          id="addRepoInput"
+          class="input-control mono"
+          style="width: 195px; height: 30px; font-size: 0.75rem;"
+          placeholder="Adicionar caminho de repo..."
+        />
+        <button class="btn" id="btnAddRepo" title="Registrar novo repositório no Kaxcav Vortex">+ Repo</button>
+        <button class="btn" id="btnSyncShards" title="Sincronizar incrementalmente via SHA-256">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Sync
+        </button>
+      </div>
+    </header>
+
+    <!-- Main 3-Pane Grid -->
+    <main class="workspace-grid">
+      <!-- Left File Tree -->
+      <aside class="sidebar-left">
+        <div class="pane-header">
+          <span>SHARD FILES</span>
+          <span class="mono" id="fileCountLabel">0 files</span>
+        </div>
+        <div class="filter-box">
+          <input type="text" id="fileFilterInput" class="input-control" placeholder="Filtrar caminho ou extensão..." />
+        </div>
+        <div class="file-list" id="fileTreeList"></div>
+      </aside>
+
+      <!-- Center Workspaces -->
+      <section class="stage-center">
+        <!-- TAB 1: Context Workbench -->
+        <div class="tab-panel active" id="panel-context">
+          <div class="query-bar">
+            <div class="query-row-main">
+              <input
+                type="text"
+                id="taskQueryInput"
+                class="query-input"
+                value="SubmodularPacker CsrGraph personalizedPageRank CodeStateMachine"
+                placeholder="Descreva a tarefa ou símbolos para empacotamento submodular..."
+              />
+              <button class="btn btn-primary" id="btnRunPack">Build Context Pack</button>
+              <button class="btn" id="btnRunDelta" title="Reexecutar enviando o ETag anterior em --delta-from para colapsar símbolos inalterados em L0_DELTA">
+                Test L0 Delta ETag
+              </button>
+            </div>
+            <div class="query-row-options">
+              <div class="option-group">
+                <span>Fidelity:</span>
+                <div class="segmented" id="fidelitySegmented">
+                  <button type="button" data-fidelity="graded" class="active">graded</button>
+                  <button type="button" data-fidelity="full">full</button>
+                  <button type="button" data-fidelity="compact">compact</button>
+                </div>
+                <span>Budget:</span>
+                <input type="number" id="budgetInput" class="input-control mono" style="width: 82px; height: 26px;" value="1800" min="400" max="12000" step="200" />
+                <span class="mono" id="activeEtagBadge">ETag: none</span>
+              </div>
+              <div class="preset-chips" id="presetChips">
+                <button type="button" class="preset-chip" data-task="SubmodularPacker CsrGraph personalizedPageRank CodeStateMachine">Core Engine &amp; Graph</button>
+                <button type="button" class="preset-chip" data-task="RepositoryShard SQLite FTS5 BM25F cas_extractions">Storage &amp; SQLite Shards</button>
+                <button type="button" class="preset-chip" data-task="MultiRepoFederator REST routes contracts symbols">Multi-Repo Federation</button>
+                <button type="button" class="preset-chip" data-task="VortexMcpServer tools context outline blast_radius">MCP Protocol &amp; Tools</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="allocation-strip">
+            <div class="allocation-stats">
+              <span id="packMetricsSummary" class="mono">Pronto para empacotar.</span>
+              <span id="packSavingsSummary" class="mono">Tokens poupados: 0</span>
+            </div>
+            <div class="meter-track" id="tokenMeterTrack">
+              <div class="meter-seg-l3" style="width: 45%"></div>
+              <div class="meter-seg-l2" style="width: 30%"></div>
+              <div class="meter-seg-l1" style="width: 15%"></div>
+              <div class="meter-seg-l0" style="width: 10%"></div>
+            </div>
+            <div class="legend-row">
+              <span class="legend-item"><span class="legend-swatch meter-seg-l3"></span>L3_FOCAL (Full Body)</span>
+              <span class="legend-item"><span class="legend-swatch meter-seg-l2"></span>L2_CONTRACT (Typed Signature)</span>
+              <span class="legend-item"><span class="legend-swatch meter-seg-l1"></span>L1_SKELETON (Outline)</span>
+              <span class="legend-item"><span class="legend-swatch meter-seg-l0"></span>L0_DELTA (ETag Deduplicated)</span>
+            </div>
+          </div>
+
+          <div class="slices-container" id="slicesContainer"></div>
+        </div>
+
+        <!-- TAB 2: CSR Topology Graph -->
+        <div class="tab-panel" id="panel-topology">
+          <div class="canvas-stage">
+            <canvas id="topologyCanvas"></canvas>
+            <div class="canvas-hud">
+              <span id="topologyStatsText">Nodes: 0 | Edges: 0</span>
+              <button class="btn" id="btnResetCamera" style="height: 24px; padding: 0 8px; font-size: 0.72rem;">Reset View</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3: Blast Radius & Contract Drift -->
+        <div class="tab-panel" id="panel-impact">
+          <div class="query-bar">
+            <div class="query-row-main">
+              <input
+                type="text"
+                id="blastTargetInput"
+                class="query-input mono"
+                value="KaxcavVortexEngine"
+                placeholder="Nome do símbolo, classe, rota ou arquivo para análise de impacto..."
+              />
+              <button class="btn btn-primary" id="btnRunBlast">Compute Blast Radius</button>
+              <button class="btn" id="btnRunDiffImpact">Scan Worktree Contract Drift</button>
+            </div>
+          </div>
+          <div class="report-scroll" id="impactReportContainer"></div>
+        </div>
+
+        <!-- TAB 4: Shards & Telemetry -->
+        <div class="tab-panel" id="panel-telemetry">
+          <div class="report-scroll" id="telemetryReportContainer"></div>
+        </div>
+      </section>
+
+      <!-- Right File & Symbol Inspector -->
+      <aside class="sidebar-right">
+        <div class="pane-header">
+          <span>STRUCTURAL INSPECTOR (L1 OUTLINE)</span>
+          <span class="mono" id="inspectorSavingsBadge"></span>
+        </div>
+        <div class="inspector-body" id="inspectorContainer">
+          <div style="color: var(--ink-muted); font-size: 0.78rem;">
+            Selecione qualquer arquivo na árvore à esquerda ou um nó no grafo CSR para inspecionar seu esqueleto estrutural e grafo de chamadas.
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Bottom Status Bar -->
+    <footer class="statusbar">
+      <div class="status-cluster">
+        <span id="statusEngineText">Engine: Kaxcav Vortex v2.0.0-apex</span>
+        <span id="statusMemoryText">Heap: -- MB | RSS: -- MB</span>
+        <span id="statusWalCapText">SQLite WAL Cap: 32,768 KB/shard</span>
+      </div>
+      <div class="status-cluster">
+        <span id="statusTotalSavingsText">Total Tokens Saved: --</span>
+        <span id="statusAvgLatencyText">Avg Query Latency: -- ms</span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      const state = {
+        activeRepo: document.getElementById('repoSelector').value,
+        activeTab: 'context',
+        fidelity: 'graded',
+        lastEtag: null,
+        topology: { nodes: [], edges: [] },
+        selectedFile: null,
+        simNodes: [],
+        simEdges: [],
+        cam: { x: 0, y: 0, zoom: 1 },
+        hoveredNode: null,
+        draggingNode: null,
+        panning: false,
+        panStart: { x: 0, y: 0 }
+      };
+
+      const elRepoSelector = document.getElementById('repoSelector');
+      const elFileTreeList = document.getElementById('fileTreeList');
+      const elFileCountLabel = document.getElementById('fileCountLabel');
+      const elFileFilterInput = document.getElementById('fileFilterInput');
+      const elTaskQueryInput = document.getElementById('taskQueryInput');
+      const elBudgetInput = document.getElementById('budgetInput');
+      const elActiveEtagBadge = document.getElementById('activeEtagBadge');
+      const elSlicesContainer = document.getElementById('slicesContainer');
+      const elPackMetricsSummary = document.getElementById('packMetricsSummary');
+      const elPackSavingsSummary = document.getElementById('packSavingsSummary');
+      const elTokenMeterTrack = document.getElementById('tokenMeterTrack');
+      const elInspectorContainer = document.getElementById('inspectorContainer');
+      const elInspectorSavingsBadge = document.getElementById('inspectorSavingsBadge');
+
+      function escapeHtml(str) {
+        return String(str ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      async function apiGet(path) {
+        const res = await fetch(path);
+        return res.json();
+      }
+
+      async function apiPost(path, body) {
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        return res.json();
+      }
+
+      // Navigation Tabs
+      document.querySelectorAll('.nav-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.nav-tab').forEach((b) => b.classList.remove('active'));
+          document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+          btn.classList.add('active');
+          const tab = btn.getAttribute('data-tab');
+          state.activeTab = tab;
+          const panel = document.getElementById('panel-' + tab);
+          if (panel) panel.classList.add('active');
+          if (tab === 'topology') {
+            resizeCanvas();
+            drawTopology();
+          } else if (tab === 'impact') {
+            runBlastRadius();
+          } else if (tab === 'telemetry') {
+            loadTelemetryTab();
+          }
+        });
+      });
+
+      // Fidelity Segmented
+      document.querySelectorAll('#fidelitySegmented button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#fidelitySegmented button').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          state.fidelity = btn.getAttribute('data-fidelity');
+          runContextPack(false);
+        });
+      });
+
+      // Preset Chips
+      document.querySelectorAll('.preset-chip').forEach((chip) => {
+        chip.addEventListener('click', async () => {
+          const repo = chip.getAttribute('data-repo');
+          const task = chip.getAttribute('data-task');
+          if (repo && repo !== state.activeRepo) {
+            state.activeRepo = repo;
+            elRepoSelector.value = repo;
+            await loadRepoTopology();
+          }
+          if (task) {
+            elTaskQueryInput.value = task;
+            await runContextPack(false);
+          }
+        });
+      });
+
+      elRepoSelector.addEventListener('change', async () => {
+        state.activeRepo = elRepoSelector.value;
+        state.lastEtag = null;
+        await loadRepoTopology();
+        await runContextPack(false);
+      });
+
+      elFileFilterInput.addEventListener('input', () => {
+        renderFileTree();
+      });
+
+      document.getElementById('btnAddRepo').addEventListener('click', async () => {
+        const inputEl = document.getElementById('addRepoInput');
+        const pathVal = (inputEl.value || '').trim();
+        if (!pathVal) return;
+        const res = await apiPost('/api/repos', { path: pathVal });
+        if (res && res.added) {
+          inputEl.value = '';
+          state.activeRepo = res.added.repositoryPath;
+          await refreshStatusFooter(true);
+          await loadRepoTopology();
+          await runContextPack(false);
+        }
+      });
+
+      document.getElementById('btnSyncShards').addEventListener('click', async () => {
+        await apiPost('/api/sync', { repo: state.activeRepo });
+        await loadRepoTopology();
+        await refreshStatusFooter(false);
+      });
+
+      document.getElementById('btnRunPack').addEventListener('click', () => runContextPack(false));
+      document.getElementById('btnRunDelta').addEventListener('click', () => runContextPack(true));
+      document.getElementById('btnRunBlast').addEventListener('click', () => runBlastRadius());
+      document.getElementById('btnRunDiffImpact').addEventListener('click', () => runDiffImpactScan());
+
+      async function refreshStatusFooter(rebuildDropdown) {
+        const data = await apiGet('/api/status');
+        if (!data || !data.status) return;
+        const st = data.status;
+
+        if (rebuildDropdown || elRepoSelector.options.length === 0) {
+          const shards = st.shards || [];
+          if (shards.length > 0) {
+            if (!state.activeRepo || !shards.some((s) => s.repositoryPath === state.activeRepo)) {
+              state.activeRepo = shards[0].repositoryPath;
+            }
+            elRepoSelector.innerHTML = shards
+              .map(
+                (s) =>
+                  '<option value="' +
+                  escapeHtml(s.repositoryPath) +
+                  '"' +
+                  (s.repositoryPath === state.activeRepo ? ' selected' : '') +
+                  '>' +
+                  escapeHtml(s.repositoryPath) +
+                  ' (' +
+                  s.fileCount +
+                  ' files)</option>'
+              )
+              .join('');
+          }
+        }
+
+        const heapMB = (st.heap_alloc_bytes / 1048576).toFixed(1);
+        const rssMB = (st.rss_bytes / 1048576).toFixed(1);
+        document.getElementById('statusMemoryText').textContent = 'Heap: ' + heapMB + ' MB | RSS: ' + rssMB + ' MB';
+        document.getElementById('statusTotalSavingsText').textContent =
+          'Saved: ' + st.telemetry.totalTokensSaved.toLocaleString('pt-BR') + ' tok (' + st.telemetry.savingsPercent + '%)';
+        document.getElementById('statusAvgLatencyText').textContent =
+          'Avg Latency: ' + st.telemetry.avgLatencyMs + ' ms';
+      }
+
+      async function loadRepoTopology() {
+        const topo = await apiGet('/api/topology?repo=' + encodeURIComponent(state.activeRepo));
+        state.topology = topo || { nodes: [], edges: [] };
+        renderFileTree();
+        setupGraphSimulation();
+        if (state.topology.nodes.length > 0) {
+          inspectFileOutline(state.topology.nodes[0].relPath);
+        }
+      }
+
+      function renderFileTree() {
+        const filter = (elFileFilterInput.value || '').toLowerCase().trim();
+        const nodes = state.topology.nodes || [];
+        const filtered = filter
+          ? nodes.filter((n) => n.relPath.toLowerCase().includes(filter))
+          : nodes;
+
+        elFileCountLabel.textContent = filtered.length + ' files';
+        elFileTreeList.innerHTML = filtered
+          .map((n) => {
+            const sel = state.selectedFile === n.relPath ? 'selected' : '';
+            const hubBadge = n.isHub ? '<span class="hub-tag">HUB</span>' : '';
+            return (
+              '<button type="button" class="file-item ' + sel + '" data-path="' + escapeHtml(n.relPath) + '">' +
+                '<span class="file-path-trunc" title="' + escapeHtml(n.relPath) + '">' + escapeHtml(n.relPath) + '</span>' +
+                hubBadge +
+                '<span class="file-meta-pill">' + n.symbolCount + 's</span>' +
+              '</button>'
+            );
+          })
+          .join('');
+
+        elFileTreeList.querySelectorAll('.file-item').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const p = btn.getAttribute('data-path');
+            if (p) inspectFileOutline(p);
+          });
+        });
+      }
+
+      async function inspectFileOutline(relPath) {
+        state.selectedFile = relPath;
+        renderFileTree();
+        const data = await apiGet(
+          '/api/outline?repo=' + encodeURIComponent(state.activeRepo) + '&file=' + encodeURIComponent(relPath)
+        );
+        if (!data || !data.outline) {
+          elInspectorContainer.innerHTML = '<div style="color: var(--ink-muted)">Arquivo não encontrado no shard.</div>';
+          return;
+        }
+        const out = data.outline;
+        const savedPct = out.tokenEstimate > 0
+          ? Math.max(0, Math.round((1 - out.outlineTokens / out.tokenEstimate) * 100))
+          : 0;
+        elInspectorSavingsBadge.textContent = out.outlineTokens + ' tok (-' + savedPct + '%)';
+
+        const cardsHtml = out.symbols
+          .map((s) => {
+            return (
+              '<div class="sym-card" data-sym="' + escapeHtml(s.name) + '">' +
+                '<div class="sym-card-top">' +
+                  '<span>' + escapeHtml(s.name) + '</span>' +
+                  '<span style="color: var(--ink-muted)">' + escapeHtml(s.kind) + ' L' + s.startLine + '-' + s.endLine + '</span>' +
+                '</div>' +
+                '<div class="sym-sig" title="' + escapeHtml(s.signature) + '">' + escapeHtml(s.signature) + '</div>' +
+              '</div>'
+            );
+          })
+          .join('');
+
+        elInspectorContainer.innerHTML =
+          '<div style="font-family: var(--font-mono); font-size: 0.76rem; color: var(--accent); word-break: break-all;">' +
+            escapeHtml(out.relPath) +
+          '</div>' +
+          '<div style="font-size: 0.72rem; color: var(--ink-secondary);">' +
+            'Full File: ' + out.tokenEstimate + ' tok | L1 Skeleton: ' + out.outlineTokens + ' tok' +
+          '</div>' +
+          cardsHtml;
+
+        elInspectorContainer.querySelectorAll('.sym-card').forEach((card) => {
+          card.addEventListener('click', () => {
+            const sym = card.getAttribute('data-sym');
+            if (sym) {
+              document.getElementById('blastTargetInput').value = sym;
+              document.querySelector('.nav-tab[data-tab="impact"]').click();
+            }
+          });
+        });
+      }
+
+      async function runContextPack(useDelta) {
+        const task = elTaskQueryInput.value.trim() || 'architecture overview';
+        const tokenBudget = Number(elBudgetInput.value) || 1800;
+        const payload = {
+          repositoryPath: state.activeRepo,
+          task,
+          tokenBudget,
+          fidelity: state.fidelity,
+          includeFederation: true,
+          deltaFrom: useDelta && state.lastEtag ? state.lastEtag : undefined
+        };
+
+        const pack = await apiPost('/api/context', payload);
+        if (!pack || !pack.slices) return;
+
+        state.lastEtag = pack.etag;
+        elActiveEtagBadge.textContent = 'ETag: ' + pack.etag;
+        elPackMetricsSummary.textContent =
+          'Slices: ' + pack.slices.length +
+          ' | Files: ' + pack.files.length +
+          ' | Used: ' + pack.tokenCount + ' / ' + pack.tokenBudget + ' tok' +
+          ' | Latency: ' + pack.elapsedMs + ' ms';
+
+        const denom = pack.tokenCount + pack.tokensSaved;
+        const pct = denom > 0 ? Math.round((pack.tokensSaved / denom) * 100) : 0;
+        elPackSavingsSummary.textContent =
+          'Saved: ' + pack.tokensSaved.toLocaleString('pt-BR') + ' tok (' + pct + '% compression)';
+
+        // Update meter proportions
+        const counts = { L3_FOCAL: 0, L2_CONTRACT: 0, L1_SKELETON: 0, L0_DELTA: 0 };
+        pack.slices.forEach((s) => {
+          counts[s.fidelityLevel] = (counts[s.fidelityLevel] || 0) + s.tokens;
+        });
+        const totalTok = Math.max(1, pack.tokenCount);
+        elTokenMeterTrack.innerHTML =
+          '<div class="meter-seg-l3" style="width:' + ((counts.L3_FOCAL / totalTok) * 100).toFixed(1) + '%"></div>' +
+          '<div class="meter-seg-l2" style="width:' + ((counts.L2_CONTRACT / totalTok) * 100).toFixed(1) + '%"></div>' +
+          '<div class="meter-seg-l1" style="width:' + ((counts.L1_SKELETON / totalTok) * 100).toFixed(1) + '%"></div>' +
+          '<div class="meter-seg-l0" style="width:' + ((counts.L0_DELTA / totalTok) * 100).toFixed(1) + '%"></div>';
+
+        elSlicesContainer.innerHTML = pack.slices
+          .map((s) => {
+            return (
+              '<article class="slice-block">' +
+                '<div class="slice-header">' +
+                  '<div class="slice-title">' +
+                    '<span class="fidelity-badge fidelity-' + s.fidelityLevel + '">' + s.fidelityLevel + '</span>' +
+                    '<span>' + escapeHtml(s.relPath) + ' :: <strong>' + escapeHtml(s.symbolName) + '</strong></span>' +
+                    '<span style="color: var(--ink-muted)">L' + s.startLine + '-L' + s.endLine + '</span>' +
+                  '</div>' +
+                  '<div class="mono" style="font-size: 0.72rem; color: var(--ink-secondary);">' +
+                    'score: ' + s.score + ' | ' + s.tokens + ' tok | etag:' + s.etag.slice(0, 8) +
+                  '</div>' +
+                '</div>' +
+                '<pre class="slice-code">' + escapeHtml(s.content) + '</pre>' +
+              '</article>'
+            );
+          })
+          .join('');
+
+        await refreshStatusFooter();
+      }
+
+      async function runBlastRadius() {
+        const target = document.getElementById('blastTargetInput').value.trim() || 'KaxcavVortexEngine';
+        const report = await apiGet(
+          '/api/blast?repo=' + encodeURIComponent(state.activeRepo) + '&target=' + encodeURIComponent(target)
+        );
+        if (!report) return;
+
+        const callersRows = (report.directCallers || [])
+          .map(
+            (c) =>
+              '<tr><td class="mono">' + escapeHtml(c.relPath) + '</td><td class="mono">' + escapeHtml(c.symbolName) + '</td><td class="mono">' + escapeHtml(c.kind) + '</td></tr>'
+          )
+          .join('') || '<tr><td colspan="3" style="color: var(--ink-muted)">Nenhum chamador direto registrado.</td></tr>';
+
+        const testsRows = (report.affectedTests || [])
+          .map((t) => '<tr><td class="mono">' + escapeHtml(t) + '</td></tr>')
+          .join('') || '<tr><td style="color: var(--ink-muted)">Nenhum arquivo de teste impactado.</td></tr>';
+
+        const fedRows = (report.crossRepoImpacts || [])
+          .map(
+            (f) =>
+              '<tr><td class="mono">' + escapeHtml(f.sourceRepo) + '</td><td class="mono">' + escapeHtml(f.sourceFile + '#' + f.sourceSymbol) + '</td><td class="mono">' + escapeHtml(f.targetRepo + '/' + f.targetFile) + '</td><td class="mono">' + escapeHtml(f.detail) + '</td></tr>'
+          )
+          .join('') || '<tr><td colspan="4" style="color: var(--ink-muted)">Sem impactos cruzados entre repositórios para este símbolo.</td></tr>';
+
+        document.getElementById('impactReportContainer').innerHTML =
+          '<div class="panel-box">' +
+            '<div class="panel-box-header">' +
+              '<span>BLAST RADIUS: ' + escapeHtml(report.target) + '</span>' +
+              '<span class="mono">Risk: ' + report.riskLevel.toUpperCase() + ' | ' + report.elapsedMs + ' ms</span>' +
+            '</div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Caller File</th><th>Caller Symbol</th><th>Edge Kind</th></tr></thead>' +
+              '<tbody>' + callersRows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>AFFECTED TEST SUITES (' + (report.affectedTests || []).length + ')</span></div>' +
+            '<table class="data-table"><tbody>' + testsRows + '</tbody></table>' +
+          '</div>' +
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>CROSS-REPO FEDERATION IMPACTS</span></div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Source Repo</th><th>Source Symbol</th><th>Target File</th><th>Contract Link</th></tr></thead>' +
+              '<tbody>' + fedRows + '</tbody>' +
+            '</table>' +
+          '</div>';
+      }
+
+      async function runDiffImpactScan() {
+        const res = await apiGet('/api/diff-impact?repo=' + encodeURIComponent(state.activeRepo));
+        if (!res) return;
+
+        const driftRows = (res.contractDrifts || [])
+          .map(
+            (d) =>
+              '<tr>' +
+                '<td class="mono">' + escapeHtml(d.qualifiedName) + '</td>' +
+                '<td class="mono" style="color: var(--ink-muted)">' + escapeHtml(d.previousSignature) + '</td>' +
+                '<td class="mono" style="color: var(--accent)">' + escapeHtml(d.currentSignature) + '</td>' +
+                '<td class="mono">' + d.affectedCallers + '</td>' +
+              '</tr>'
+          )
+          .join('') || '<tr><td colspan="4" style="color: var(--ink-muted)">Nenhuma quebra de assinatura detectada no histórico recente deste shard.</td></tr>';
+
+        const recentRows = (res.recentlyModifiedFiles || [])
+          .map((f) => '<tr><td class="mono">' + escapeHtml(f) + '</td></tr>')
+          .join('') || '<tr><td style="color: var(--ink-muted)">Nenhum arquivo modificado nos últimos 60 minutos.</td></tr>';
+
+        document.getElementById('impactReportContainer').innerHTML =
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>CONTRACT DRIFT DETECTOR (SIGNATURE DIFF)</span></div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Symbol</th><th>Previous Signature</th><th>Current Signature</th><th>Callers</th></tr></thead>' +
+              '<tbody>' + driftRows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>RECENTLY MODIFIED WORKTREE FILES</span></div>' +
+            '<table class="data-table"><tbody>' + recentRows + '</tbody></table>' +
+          '</div>';
+      }
+
+      async function loadTelemetryTab() {
+        const data = await apiGet('/api/status');
+        if (!data || !data.status) return;
+        const st = data.status;
+
+        const shardRows = (st.shards || [])
+          .map((s) => {
+            const dbKB = (s.dbSizeBytes / 1024).toFixed(1);
+            const walKB = (s.walSizeBytes / 1024).toFixed(1);
+            return (
+              '<tr>' +
+                '<td class="mono">' + escapeHtml(s.repositoryPath) + '</td>' +
+                '<td class="mono">' + s.fileCount + '</td>' +
+                '<td class="mono">' + s.symbolCount + '</td>' +
+                '<td class="mono">' + s.edgeCount + '</td>' +
+                '<td class="mono">' + dbKB + ' KB</td>' +
+                '<td class="mono">' + walKB + ' KB / 32,768 KB</td>' +
+              '</tr>'
+            );
+          })
+          .join('');
+
+        const qRows = (data.recentQueries || [])
+          .map((q) => {
+            return (
+              '<tr>' +
+                '<td class="mono">' + escapeHtml(q.ts.slice(11, 19)) + '</td>' +
+                '<td class="mono">' + escapeHtml(q.repo) + '</td>' +
+                '<td>' + escapeHtml(q.task) + '</td>' +
+                '<td class="mono">' + q.tokensReturned + ' tok</td>' +
+                '<td class="mono" style="color: var(--accent)">+' + q.tokensSaved + ' tok</td>' +
+                '<td class="mono">' + q.elapsedMs + ' ms</td>' +
+              '</tr>'
+            );
+          })
+          .join('');
+
+        const fedRows = (data.federationLinks || [])
+          .map((f) => {
+            return (
+              '<tr>' +
+                '<td class="mono">' + escapeHtml(f.linkKind) + '</td>' +
+                '<td class="mono">' + escapeHtml(f.sourceRepo.split('\\').pop() + '/' + f.sourceFile) + '</td>' +
+                '<td class="mono">' + escapeHtml(f.targetRepo.split('\\').pop() + '/' + f.targetFile) + '</td>' +
+                '<td class="mono">' + escapeHtml(f.detail) + '</td>' +
+              '</tr>'
+            );
+          })
+          .join('');
+
+        document.getElementById('telemetryReportContainer').innerHTML =
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>ISOLATED SQLITE SHARDS (32 MB HARD WAL GUARD)</span></div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Repository</th><th>Files</th><th>Symbols</th><th>CSR Edges</th><th>Shard Size</th><th>WAL Size vs Hard Cap</th></tr></thead>' +
+              '<tbody>' + shardRows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>CROSS-REPO FEDERATION LINKS (' + (data.federationLinks || []).length + ')</span></div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Link Type</th><th>Source</th><th>Target</th><th>Contract Detail</th></tr></thead>' +
+              '<tbody>' + fedRows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+          '<div class="panel-box">' +
+            '<div class="panel-box-header"><span>LIVE AGENT QUERY &amp; TOKEN SAVINGS LOG</span></div>' +
+            '<table class="data-table">' +
+              '<thead><tr><th>Time</th><th>Repo</th><th>Task</th><th>Returned</th><th>Saved</th><th>Latency</th></tr></thead>' +
+              '<tbody>' + qRows + '</tbody>' +
+            '</table>' +
+          '</div>';
+      }
+
+      // Interactive HTML5 Canvas CSR Graph
+      const canvas = document.getElementById('topologyCanvas');
+      const ctx = canvas.getContext('2d');
+
+      function resizeCanvas() {
+        const rect = canvas.parentElement.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(300, rect.width) * dpr;
+        canvas.height = Math.max(300, rect.height) * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function setupGraphSimulation() {
+        const nodes = state.topology.nodes || [];
+        const edges = state.topology.edges || [];
+        document.getElementById('topologyStatsText').textContent =
+          'CSR Nodes: ' + nodes.length + ' | Resolved Edges: ' + edges.length;
+
+        const idMap = new Map();
+        const count = nodes.length;
+        state.simNodes = nodes.map((n, i) => {
+          const angle = (i / Math.max(1, count)) * Math.PI * 2;
+          const radius = n.isHub ? 65 : 140 + (i % 3) * 65;
+          const simNode = {
+            ...n,
+            x: Math.cos(angle) * radius,
+            y: Math.sin(angle) * radius,
+            vx: 0,
+            vy: 0
+          };
+          idMap.set(n.id, simNode);
+          return simNode;
+        });
+
+        state.simEdges = edges
+          .map((e) => ({
+            source: idMap.get(e.source),
+            target: idMap.get(e.target),
+            weight: e.weight
+          }))
+          .filter((e) => e.source && e.target);
+
+        // Run 60 synchronous relaxation ticks for instant clean layout
+        for (let step = 0; step < 60; step++) {
+          for (let i = 0; i < state.simNodes.length; i++) {
+            const a = state.simNodes[i];
+            for (let j = i + 1; j < state.simNodes.length; j++) {
+              const b = state.simNodes[j];
+              const dx = b.x - a.x;
+              const dy = b.y - a.y;
+              const distSq = dx * dx + dy * dy + 1;
+              if (distSq < 18000) {
+                const f = 900 / distSq;
+                a.vx -= dx * f;
+                a.vy -= dy * f;
+                b.vx += dx * f;
+                b.vy += dy * f;
+              }
+            }
+          }
+          for (const e of state.simEdges) {
+            const dx = e.target.x - e.source.x;
+            const dy = e.target.y - e.source.y;
+            e.source.vx += dx * 0.015;
+            e.source.vy += dy * 0.015;
+            e.target.vx -= dx * 0.015;
+            e.target.vy -= dy * 0.015;
+          }
+          for (const n of state.simNodes) {
+            n.vx *= 0.6;
+            n.vy *= 0.6;
+            n.x += Math.max(-18, Math.min(18, n.vx));
+            n.y += Math.max(-18, Math.min(18, n.vy));
+          }
+        }
+
+        state.cam = { x: 0, y: 0, zoom: 1 };
+        if (state.activeTab === 'topology') {
+          resizeCanvas();
+          drawTopology();
+        }
+      }
+
+      function drawTopology() {
+        const rect = canvas.parentElement.getBoundingClientRect();
+        const w = rect.width;
+        const h = rect.height;
+        ctx.clearRect(0, 0, w, h);
+
+        ctx.save();
+        ctx.translate(w / 2 + state.cam.x, h / 2 + state.cam.y);
+        ctx.scale(state.cam.zoom, state.cam.zoom);
+
+        const activeId = state.hoveredNode ? state.hoveredNode.id : null;
+
+        // Draw Edges
+        for (const e of state.simEdges) {
+          const isConnected = activeId && (e.source.id === activeId || e.target.id === activeId);
+          ctx.beginPath();
+          ctx.moveTo(e.source.x, e.source.y);
+          ctx.lineTo(e.target.x, e.target.y);
+          if (isConnected) {
+            ctx.strokeStyle = e.source.id === activeId ? '#58a6ff' : '#f0883e';
+            ctx.lineWidth = 1.8;
+          } else {
+            ctx.strokeStyle = 'rgba(130, 145, 165, 0.22)';
+            ctx.lineWidth = 1;
+          }
+          ctx.stroke();
+        }
+
+        // Draw Nodes
+        for (const n of state.simNodes) {
+          const isSelected = state.selectedFile === n.relPath;
+          const isHovered = state.hoveredNode && state.hoveredNode.id === n.id;
+          const r = Math.min(13, 5 + Math.sqrt(n.inDegree + n.outDegree + 1) * 1.4);
+
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+          if (isSelected || isHovered) {
+            ctx.fillStyle = '#f0883e';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+          } else if (n.isHub) {
+            ctx.fillStyle = '#a371f7';
+            ctx.strokeStyle = '#1f242c';
+            ctx.lineWidth = 1.5;
+          } else {
+            ctx.fillStyle = '#4b8bbe';
+            ctx.strokeStyle = '#1f242c';
+            ctx.lineWidth = 1.2;
+          }
+          ctx.fill();
+          ctx.stroke();
+
+          if (state.cam.zoom > 0.65 || isSelected || isHovered) {
+            const shortName = n.relPath.split('/').pop();
+            ctx.font = '11px "JetBrains Mono", Consolas, monospace';
+            ctx.fillStyle = isSelected || isHovered ? '#ffffff' : 'rgba(215, 222, 232, 0.85)';
+            ctx.fillText(shortName, n.x + r + 5, n.y + 3);
+          }
+        }
+
+        ctx.restore();
+      }
+
+      function screenToWorld(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = clientX - rect.left - rect.width / 2 - state.cam.x;
+        const sy = clientY - rect.top - rect.height / 2 - state.cam.y;
+        return { x: sx / state.cam.zoom, y: sy / state.cam.zoom };
+      }
+
+      canvas.addEventListener('mousedown', (ev) => {
+        const pt = screenToWorld(ev.clientX, ev.clientY);
+        const hit = state.simNodes.find((n) => Math.hypot(n.x - pt.x, n.y - pt.y) < 14);
+        if (hit) {
+          state.draggingNode = hit;
+          inspectFileOutline(hit.relPath);
+          drawTopology();
+        } else {
+          state.panning = true;
+          state.panStart = { x: ev.clientX - state.cam.x, y: ev.clientY - state.cam.y };
+        }
+      });
+
+      window.addEventListener('mousemove', (ev) => {
+        if (state.draggingNode) {
+          const pt = screenToWorld(ev.clientX, ev.clientY);
+          state.draggingNode.x = pt.x;
+          state.draggingNode.y = pt.y;
+          drawTopology();
+        } else if (state.panning) {
+          state.cam.x = ev.clientX - state.panStart.x;
+          state.cam.y = ev.clientY - state.panStart.y;
+          drawTopology();
+        } else if (state.activeTab === 'topology') {
+          const pt = screenToWorld(ev.clientX, ev.clientY);
+          const hit = state.simNodes.find((n) => Math.hypot(n.x - pt.x, n.y - pt.y) < 14) || null;
+          if (hit !== state.hoveredNode) {
+            state.hoveredNode = hit;
+            drawTopology();
+          }
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        state.draggingNode = null;
+        state.panning = false;
+      });
+
+      canvas.addEventListener('wheel', (ev) => {
+        ev.preventDefault();
+        const factor = ev.deltaY < 0 ? 1.12 : 0.89;
+        state.cam.zoom = Math.max(0.3, Math.min(3.5, state.cam.zoom * factor));
+        drawTopology();
+      });
+
+      document.getElementById('btnResetCamera').addEventListener('click', () => {
+        state.cam = { x: 0, y: 0, zoom: 1 };
+        drawTopology();
+      });
+
+      window.addEventListener('resize', () => {
+        if (state.activeTab === 'topology') {
+          resizeCanvas();
+          drawTopology();
+        }
+      });
+
+      // Boot sequence
+      (async function init() {
+        await refreshStatusFooter(true);
+        await loadRepoTopology();
+        await runContextPack(false);
+      })();
+    })();
+  </script>
+</body>
+</html>
