@@ -1,0 +1,13 @@
+[
+  {
+    "name": "kvx",
+    "path": "..",
+    "roots": ["src"]
+  },
+  {
+    "name": "zod",
+    "path": ".cache/repos/zod",
+    "commit": "19c40d2072288b4cafec851e9d056a72a88e5973",
+    "roots": ["packages/zod/src"]
+  }
+]
