@@ -9,7 +9,30 @@ export type SupportedLanguage =
   | 'json'
   | 'yaml'
   | 'powershell'
+  | 'java'
+  | 'csharp'
+  | 'cpp'
+  | 'rust'
+  | 'ruby'
+  | 'php'
+  | 'bash'
   | 'other'
+
+/** Languages treated as source code (slop scan, `corpus: code`). */
+export const CODE_LANGUAGES: ReadonlySet<string> = new Set([
+  'typescript',
+  'javascript',
+  'python',
+  'go',
+  'powershell',
+  'java',
+  'csharp',
+  'cpp',
+  'rust',
+  'ruby',
+  'php',
+  'bash',
+])
 
 export type SymbolKind =
   | 'class'
@@ -24,6 +47,7 @@ export type SymbolKind =
   | 'model'
   | 'table'
   | 'section'
+  | 'namespace'
 
 export type EdgeKind =
   | 'imports'
@@ -145,6 +169,8 @@ export interface ExtractionResult {
   edges: ExtractedEdge[]
   routes: ExtractedRoute[]
   slopFindings?: SlopFinding[]
+  /** Identifier usages: [name, line, col, kind] (1-based), declaration sites excluded. */
+  refs?: Array<[string, number, number, string]>
 }
 
 export interface StoredFileRow {
@@ -261,6 +287,8 @@ export interface BlastRadiusReport {
   directCallers: Array<{ repo: string; relPath: string; symbolName: string; kind: string; line: number }>
   transitiveFiles: string[]
   affectedTests: string[]
+  /** Files that changed together with the target in recent git history (absent outside git). */
+  coChanged?: Array<{ relPath: string; commits: number; ratio: number }>
   crossRepoImpacts: FederationLink[]
   riskLevel: 'low' | 'medium' | 'high' | 'critical'
   elapsedMs: number
@@ -295,6 +323,8 @@ export interface EngineStatus {
   rss_bytes: number
   shards: ShardHealth[]
   federationEdges: number
+  /** Optional tree-sitter layer: which languages it covers, or why it is off. */
+  parsers?: { treeSitter: { ready: boolean; languages: string[]; reason?: string; version?: string } }
   telemetry: {
     totalQueries: number
     totalTokensReturned: number

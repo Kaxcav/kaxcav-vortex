@@ -1,0 +1,151 @@
+[
+  {
+    "name": "kvx-mcp",
+    "enabled": true,
+    "command": "node",
+    "args": [
+      "--experimental-strip-types",
+      "--no-warnings",
+      "../src/cli/main.ts",
+      "serve",
+      "--mcp"
+    ],
+    "cwd": ".",
+    "tools": {
+      "outline": {
+        "tool": "file_outline",
+        "args": {
+          "repo": "{repo}",
+          "file": "{file}",
+          "escopo": "tudo"
+        }
+      },
+      "readSymbol": {
+        "tool": "read_symbol",
+        "args": {
+          "repo": "{repo}",
+          "symbol": "{file}#{symbol}"
+        }
+      },
+      "references": {
+        "tool": "find_references",
+        "args": {
+          "repo": "{repo}",
+          "symbol": "{file}#{symbol}",
+          "limit": 1000
+        }
+      }
+    }
+  },
+  {
+    "name": "serena",
+    "enabled": false,
+    "note": "Check argument names against tools/list before enabling",
+    "command": "serena",
+    "args": ["serve"],
+    "tools": {
+      "outline": {
+        "tool": "get_symbols_overview",
+        "args": {
+          "repo": "{repo}",
+          "file": "{file}"
+        }
+      },
+      "readSymbol": {
+        "tool": "find_symbol",
+        "args": {
+          "repo": "{repo}",
+          "name": "{symbol}"
+        }
+      },
+      "references": {
+        "tool": "find_referencing_symbols",
+        "args": {
+          "repo": "{repo}",
+          "name": "{symbol}"
+        }
+      }
+    }
+  },
+  {
+    "name": "jcodemunch",
+    "enabled": false,
+    "note": "Check argument names against tools/list before enabling",
+    "command": "jcodemunch",
+    "args": ["serve"],
+    "tools": {
+      "outline": {
+        "tool": "get_file_outline",
+        "args": {
+          "path": "{absFile}"
+        }
+      },
+      "readSymbol": {
+        "tool": "get_symbol_source",
+        "args": {
+          "symbol": "{symbol}"
+        }
+      },
+      "references": {
+        "tool": "find_references",
+        "args": {
+          "symbol": "{symbol}"
+        }
+      }
+    }
+  },
+  {
+    "name": "symforge",
+    "enabled": false,
+    "note": "Check argument names against tools/list before enabling",
+    "command": "symforge",
+    "args": ["serve"],
+    "tools": {
+      "outline": {
+        "tool": "get_file_context",
+        "args": {
+          "file": "{file}"
+        }
+      },
+      "readSymbol": {
+        "tool": "get_symbol",
+        "args": {
+          "name": "{symbol}"
+        }
+      },
+      "references": {
+        "tool": "find_references",
+        "args": {
+          "name": "{symbol}"
+        }
+      }
+    }
+  },
+  {
+    "name": "codebase-memory",
+    "enabled": false,
+    "note": "Check argument names against tools/list before enabling",
+    "command": "codebase-memory",
+    "args": ["serve"],
+    "tools": {
+      "outline": {
+        "tool": "get_file_outline",
+        "args": {
+          "file": "{file}"
+        }
+      },
+      "readSymbol": {
+        "tool": "get_code_snippet",
+        "args": {
+          "name": "{symbol}"
+        }
+      },
+      "references": {
+        "tool": "search_graph",
+        "args": {
+          "query": "{symbol}"
+        }
+      }
+    }
+  }
+]

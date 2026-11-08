@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, motor-superior]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22', '24', '26']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Node and SQLite
+        run: node -e "const s=require('node:sqlite');console.log(process.version, typeof s.DatabaseSync)"
+      # Zero-dependency mode first: the built-in extractors, tree-sitter tests skip themselves.
+      - name: Tests (no dependencies)
+        run: npm test
+      - name: Install optional tree-sitter layer
+        run: npm ci
+      - name: Tests (tree-sitter WASM)
+        run: npm test
+      - name: tree-sitter must be active in this round
+        shell: bash
+        run: node --experimental-strip-types --no-warnings -e "import('./src/parser/treesitter.ts').then(async (m) => { const r = await m.initTreeSitter(); console.log(JSON.stringify(r)); if (!r.ready) process.exit(1) })"

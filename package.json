@@ -36,6 +36,9 @@
     "bench": "node --experimental-strip-types ./src/cli/main.ts bench"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
+  },
+  "optionalDependencies": {
+    "@vscode/tree-sitter-wasm": "^0.3.1"
   }
 }

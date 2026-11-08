@@ -8,16 +8,26 @@ import type {
   ScannedFile,
   SymbolKind,
 } from '../core/types.ts'
+import { CODE_LANGUAGES } from '../core/types.ts'
 import { CodeStateMachine } from './lexer.ts'
+import { collectTextRefs, dropDeclarationSites } from './refs.ts'
+import { treeSitterExtract, treeSitterHandles, treeSitterStatus } from './treesitter.ts'
 import { TsDeclarationScanner, type TsScanResult } from './ts-scanner.ts'
 
 /**
  * Bump whenever extraction output changes, so cached extractions (CAS) and stored
  * symbols are rebuilt instead of mixing old and new ranges.
  */
-export const EXTRACTOR_VERSION = 'x7-scope-ast'
+export const EXTRACTOR_VERSION = 'x11-refs'
 
-const CODE_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'python', 'go', 'powershell'])
+/**
+ * Version stamped on shards and CAS keys: the base version plus the tree-sitter layer when it
+ * is loaded, so turning the optional layer on or off re-extracts instead of mixing outputs.
+ */
+export function extractorVersion(): string {
+  const ts = treeSitterStatus()
+  return ts.ready ? `${EXTRACTOR_VERSION}+tsw${ts.version ?? ''}:${ts.languages.length}` : EXTRACTOR_VERSION
+}
 
 const JS_STOPWORDS = new Set([
   'if',
@@ -78,7 +88,13 @@ export class PolyglotExtractor {
   extract(file: ScannedFile): ExtractionResult {
     const res = this.extractByLanguage(file)
     // Slop markers are about code: a Markdown heading like `## TODO` is not a code placeholder.
-    res.slopFindings = CODE_LANGS.has(file.lang) ? CodeStateMachine.scanSlop(file.relPath, file.content) : []
+    res.slopFindings = CODE_LANGUAGES.has(file.lang) ? CodeStateMachine.scanSlop(file.relPath, file.content) : []
+    // Usages for find_references/rename: tree-sitter fills them from the syntax tree; the
+    // other code files use the column-preserving text collector.
+    if (CODE_LANGUAGES.has(file.lang)) {
+      const refs = res.refs ?? collectTextRefs(file.content, file.lang)
+      res.refs = dropDeclarationSites(refs as Parameters<typeof dropDeclarationSites>[0], res.symbols)
+    }
     for (const sym of res.symbols) {
       sym.complexity = this.computeComplexity(sym.sliceText)
       sym.scope ??= 'module'
@@ -87,6 +103,11 @@ export class PolyglotExtractor {
   }
 
   private extractByLanguage(file: ScannedFile): ExtractionResult {
+    // TS/JS keep the scope-aware scanner; the other code languages use tree-sitter when loaded.
+    if (file.lang !== 'typescript' && file.lang !== 'javascript' && treeSitterHandles(file.lang)) {
+      const res = treeSitterExtract(file)
+      if (res) return this.completeTreeSitter(file, res)
+    }
     switch (file.lang) {
       case 'typescript':
       case 'javascript':
@@ -103,6 +124,23 @@ export class PolyglotExtractor {
       default:
         return this.extractGeneric(file)
     }
+  }
+
+  /**
+   * Keeps what the regex extractors already knew and tree-sitter does not model (HTTP routes of
+   * Python/Go) and gives declaration-less files the whole-file section, keeping their imports.
+   */
+  private completeTreeSitter(file: ScannedFile, res: ExtractionResult): ExtractionResult {
+    if (file.lang === 'python' || file.lang === 'go') {
+      const legacy = file.lang === 'python' ? this.extractPython(file) : this.extractGo(file)
+      res.routes.push(...legacy.routes)
+      res.edges.push(...legacy.edges.filter((e) => e.kind === 'routes_to'))
+    }
+    if (res.symbols.length === 0) {
+      const generic = this.extractGeneric(file)
+      return { ...generic, edges: res.edges, routes: res.routes, refs: res.refs }
+    }
+    return res
   }
 
   private computeComplexity(text: string): number {

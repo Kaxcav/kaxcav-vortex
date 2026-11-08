@@ -3,6 +3,10 @@ import { resolve } from 'node:path'
 import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../engine.ts'
 import { KvxIgnoreError } from '../core/kvxignore.ts'
 import type { OutlineScope } from '../storage/shard.ts'
+import type { SymbolEditOp } from '../edit/symbol-editor.ts'
+
+/** Booleans from MCP clients may arrive as strings: only true/"true"/1 count. */
+const flag = (v: unknown): boolean => v === true || v === 'true' || v === 1 || v === '1'
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -67,7 +71,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'blast_radius',
     readOnly: true,
-    description: 'Compute direct callers, transitive impact files, affected tests, and cross-repo impacts.',
+    description: 'Compute direct callers, transitive impact files, affected tests, files that historically change together with the target (git co-change), and cross-repo impacts.',
     inputSchema: { type: 'object', properties: { repo: str, target: str }, required: ['repo', 'target'] },
   },
   {
@@ -96,6 +100,27 @@ export const TOOL_DEFS: ToolDef[] = [
     inputSchema: { type: 'object', properties: { repo: str, symbol: str, path: str }, required: ['symbol'] },
   },
   {
+    name: 'repo_map',
+    readOnly: true,
+    description:
+      'Orientation map with no query: code files ranked by dependency PageRank (what the rest of the code depends on comes first), each with its exported signatures, within `budget` tokens (default 1500). `focus` (files) personalizes the ranking around them; `path` limits to a folder; tests are left out unless `include_tests`.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, budget: num, focus: { type: 'array', items: str }, path: str, include_tests: { type: 'boolean' } },
+    },
+  },
+  {
+    name: 'find_references',
+    readOnly: true,
+    description:
+      'Every usage of ONE symbol (definition excluded): file, line, column, kind (call | member_call | member | import | jsx | other), enclosing symbol and the line text. Confidence: same_file, imported (the file imports the target), name_only (same name, no import link). Ambiguous names return candidates: use `path#Name`. `include_name_only:false` keeps only linked usages.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, symbol: str, path: str, limit: num, include_name_only: { type: 'boolean' } },
+      required: ['symbol'],
+    },
+  },
+  {
     name: 'call_graph',
     readOnly: true,
     description: 'Return direct callers and callees of a symbol.',
@@ -107,6 +132,35 @@ export const TOOL_DEFS: ToolDef[] = [
     description:
       'Recently modified files, breaking contract drift of EXPORTED symbols (no locals, no tests) changed in the window, affected callers and tests.',
     inputSchema: { type: 'object', properties: { repo: str, window_minutes: num } },
+  },
+  {
+    name: 'edit_symbol',
+    description:
+      "Edits ONE symbol by whole lines: op replace | insert_before | insert_after | delete. Use `path#Class.method` when the name is ambiguous (the refusal lists the candidates). Pass `expected_hash` (the `hash` from read_symbol) to refuse if the symbol changed since you read it. Refuses .kvxignore'd files, edits that would break symbol locks (kvx or Fábrica) and, with tree-sitter installed, edits that add syntax errors. Writes atomically, keeps BOM/line endings and reindexes the file; `dry_run` previews without writing. Not available on the read-only server.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: str,
+        symbol: str,
+        path: str,
+        op: { type: 'string', enum: ['replace', 'insert_before', 'insert_after', 'delete'] },
+        text: { type: 'string', description: 'Whole lines (with their indentation). Not used by delete.' },
+        expected_hash: str,
+        dry_run: { type: 'boolean' },
+        allow_syntax_errors: { type: 'boolean' },
+      },
+      required: ['symbol', 'op'],
+    },
+  },
+  {
+    name: 'rename_symbol',
+    description:
+      'Two-phase rename of ONE symbol across the repository. Without `plan_token`: returns the plan (every edit as file:line before -> after, usages skipped as name_only, and a `plan_token`) and writes nothing. Call again with that `plan_token` to apply: refused if any file changed since the plan. Covers the declaration and same_file/imported usages (`include_name_only` adds same-name usages without an import link). Refuses name collisions, .kvxignore\'d files, broken symbol locks and new syntax errors. Not available on the read-only server.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, symbol: str, new_name: str, path: str, plan_token: str, include_name_only: { type: 'boolean' } },
+      required: ['symbol', 'new_name'],
+    },
   },
   {
     name: 'nexus_ingest_vault',
@@ -203,7 +257,8 @@ export class VortexMcpServer {
   }
 
   private text(id: string | number | null | undefined, payload: unknown, extra: JsonRecord = {}): JsonRecord {
-    const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+    // Compact JSON: indentation cost ~3-4x the tokens of the same answer (bench T1: 3625 -> ~830).
+    const text = typeof payload === 'string' ? payload : JSON.stringify(payload)
     return this.respond(id, { content: [{ type: 'text', text }], ...extra })
   }
 
@@ -262,10 +317,53 @@ export class VortexMcpServer {
         })
         return this.text(id, res.matches.length > 0 ? res.matches : res)
       }
+      case 'repo_map': {
+        const res = this.engine.repoMap(this.repoArg(args), {
+          budget: args.budget ? Number(args.budget) : undefined,
+          focus: Array.isArray(args.focus) ? args.focus.map(String) : undefined,
+          path: args.path ? String(args.path) : undefined,
+          includeTests: flag(args.include_tests),
+        })
+        if (!res.ok) return this.text(id, res, { isError: true })
+        return this.respond(id, {
+          content: [{ type: 'text', text: res.markdown || res.reason || '' }],
+          meta: { tokens: res.tokens, files: res.files.length, omittedFiles: res.omittedFiles },
+        })
+      }
+      case 'find_references': {
+        const res = this.engine.findReferences(this.repoArg(args), String(args.symbol ?? args.name ?? ''), {
+          path: args.path ? String(args.path) : undefined,
+          limit: args.limit ? Number(args.limit) : undefined,
+          includeNameOnly: args.include_name_only === undefined ? undefined : flag(args.include_name_only),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
+      }
       case 'call_graph':
         return this.text(id, this.engine.callGraph(this.repoArg(args), String(args.symbol ?? args.name ?? '')))
       case 'diff_impact':
         return this.text(id, this.engine.diffImpact(this.repoArg(args), Number(args.window_minutes ?? 60)))
+      case 'edit_symbol': {
+        const res = this.engine.editSymbol(this.repoArg(args), {
+          symbol: String(args.symbol ?? args.name ?? ''),
+          path: args.path ? String(args.path) : undefined,
+          op: String(args.op ?? '') as SymbolEditOp,
+          text: typeof args.text === 'string' ? args.text : undefined,
+          expectedHash: args.expected_hash ? String(args.expected_hash) : undefined,
+          dryRun: flag(args.dry_run),
+          allowSyntaxErrors: flag(args.allow_syntax_errors),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
+      }
+      case 'rename_symbol': {
+        const res = this.engine.renameSymbol(this.repoArg(args), {
+          symbol: String(args.symbol ?? args.name ?? ''),
+          newName: String(args.new_name ?? ''),
+          path: args.path ? String(args.path) : undefined,
+          planToken: args.plan_token ? String(args.plan_token) : undefined,
+          includeNameOnly: flag(args.include_name_only),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
+      }
       case 'nexus_ingest_vault': {
         const sourceDir = resolve(String(args.source_dir ?? process.cwd()))
         this.engine.assertPathAllowed(sourceDir)

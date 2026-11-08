@@ -4,6 +4,7 @@ import type { ContextFidelity } from '../core/types.ts'
 import { DriveAppServer } from '../drive-app/server.ts'
 import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../engine.ts'
 import { VortexMcpServer } from '../mcp/server.ts'
+import { initTreeSitter } from '../parser/treesitter.ts'
 import { VortexDashboardServer } from '../ui/server.ts'
 
 function parseFlags(argv: string[]): {
@@ -152,6 +153,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     return 0
   }
 
+  // Before the engine opens any shard: the extractor version depends on the optional layer.
+  await initTreeSitter()
   const engine = new KaxcavVortexEngine()
 
   try {

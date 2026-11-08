@@ -1,0 +1,9 @@
+{
+  "name": "kaxcav-vortex-bench",
+  "private": true,
+  "description": "Reproducible benchmark harness for kaxcav-vortex (ground truth from the TypeScript compiler).",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

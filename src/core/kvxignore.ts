@@ -117,10 +117,10 @@ function parseRules(source: string, text: string, baseDir: string, allowAbsolute
   return rules
 }
 
-function loadRuleFile(path: string, baseDir: string, allowAbsolute: boolean): Rule[] {
+function loadRuleFile(path: string, baseDir: string, allowAbsolute: boolean, fresh = false): Rule[] {
   const now = Date.now()
   const cached = fileRuleCache.get(path)
-  if (cached && now - cached.checkedAt < CACHE_TTL_MS) return cached.rules
+  if (!fresh && cached && now - cached.checkedAt < CACHE_TTL_MS) return cached.rules
   let mtimeMs = -1
   try {
     mtimeMs = statSync(path).mtimeMs
@@ -142,18 +142,18 @@ function loadRuleFile(path: string, baseDir: string, allowAbsolute: boolean): Ru
   return rules
 }
 
-function dirHasIgnoreFile(dirNative: string): boolean {
+function dirHasIgnoreFile(dirNative: string, fresh = false): boolean {
   const now = Date.now()
   const cached = dirHasIgnoreCache.get(dirNative)
-  if (cached && now - cached.checkedAt < CACHE_TTL_MS) return cached.exists
+  if (!fresh && cached && now - cached.checkedAt < CACHE_TTL_MS) return cached.exists
   const exists = existsSync(join(dirNative, KVXIGNORE_FILENAME))
   dirHasIgnoreCache.set(dirNative, { checkedAt: now, exists })
   return exists
 }
 
-function collectRules(absNative: string): Rule[] {
+function collectRules(absNative: string, fresh = false): Rule[] {
   const rules: Rule[] = []
-  for (const g of globalIgnoreFiles()) rules.push(...loadRuleFile(g, '', true))
+  for (const g of globalIgnoreFiles()) rules.push(...loadRuleFile(g, '', true, fresh))
   const ancestors: string[] = []
   let dir = dirname(resolve(absNative))
   for (let guard = 0; guard < 64; guard++) {
@@ -165,8 +165,8 @@ function collectRules(absNative: string): Rule[] {
   // The target itself may be a directory holding a .kvxignore (e.g. a repo root).
   ancestors.push(resolve(absNative))
   for (const a of ancestors) {
-    if (dirHasIgnoreFile(a)) {
-      rules.push(...loadRuleFile(join(a, KVXIGNORE_FILENAME), normalizeFsPath(a), false))
+    if (dirHasIgnoreFile(a, fresh)) {
+      rules.push(...loadRuleFile(join(a, KVXIGNORE_FILENAME), normalizeFsPath(a), false, fresh))
     }
   }
   return rules
@@ -197,8 +197,12 @@ function ruleMatches(rule: Rule, candidate: string, candidateIsDir: boolean): bo
 }
 
 /** Evaluates `.kvxignore` rules for an absolute path (file or directory). */
-export function checkKvxIgnore(absPath: string, isDirectory?: boolean): KvxIgnoreVerdict {
-  const rules = collectRules(absPath)
+/**
+ * `fresh` skips the 2 s caches of rule files and directory probes: writes (edit_symbol) must see
+ * a .kvxignore created a moment ago; reads may lag by the TTL.
+ */
+export function checkKvxIgnore(absPath: string, isDirectory?: boolean, opts: { fresh?: boolean } = {}): KvxIgnoreVerdict {
+  const rules = collectRules(absPath, opts.fresh === true)
   if (rules.length === 0) return { ignored: false }
   const target = normalizeFsPath(absPath)
   let targetIsDir = isDirectory

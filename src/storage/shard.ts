@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
@@ -14,18 +15,27 @@ import type {
   StoredSymbolRow,
 } from '../core/types.ts'
 import { CsrGraph, type CsrEdgeInput } from '../graph/csr.ts'
-import { EXTRACTOR_VERSION, PolyglotExtractor } from '../parser/extractor.ts'
-import type { SlopFinding } from '../core/types.ts'
+import { extractorVersion, PolyglotExtractor } from '../parser/extractor.ts'
+import { treeSitterStatus } from '../parser/treesitter.ts'
+import { CODE_LANGUAGES, type SlopFinding } from '../core/types.ts'
 
 /**
- * Bumped when the shard schema changes. The version is part of the shard file name so an
- * older kvx process still running (e.g. an MCP server not yet restarted) never writes old
- * rows into a newer shard.
+ * Bumped when the shard schema or the extractor family changes. The version is part of the
+ * shard file name so an older kvx process still running (e.g. an MCP server not yet
+ * restarted, or an embedded copy) never writes old rows into a newer shard. v5: polyglot
+ * extractor, optional tree-sitter layer.
  */
-export const SHARD_SCHEMA_VERSION = 4
+export const SHARD_SCHEMA_VERSION = 5
 
 /** Minimum interval between two full repository stat-walks triggered by queries. */
 const SYNC_THROTTLE_MS = 500
+
+/**
+ * A large (re)index commits every N extracted files. One transaction for a whole big repo made
+ * the WAL grow to gigabytes and SQLite slower with every page (HyperAv, 8.7k files: 18 min).
+ * Every file's rows are replaced together, so a reader between batches sees whole files.
+ */
+const SYNC_BATCH_FILES = 300
 
 /** WAL is truncated after an indexing pass, or whenever it exceeds this fraction of the DB. */
 const WAL_MAX_DB_RATIO = 0.25
@@ -33,6 +43,41 @@ const WAL_MAX_DB_RATIO = 0.25
 /** Escapes `%`, `_` and `\` so user input is literal inside LIKE (use with ESCAPE '\'). */
 export function likeEscape(s: string): string {
   return s.replace(/[\\%_]/g, '\\$&')
+}
+
+/**
+ * Turns a non-relative module reference into a lowercase path (2+ segments), or null:
+ * `com.acme.Invoice` -> com/acme/invoice, `crate::db::pool` -> db/pool,
+ * `App\Models\User` -> app/models/user, `github.com/o/r/pkg/util` stays a path.
+ */
+export function moduleHintToPath(hint: string): string | null {
+  if (!hint || hint.startsWith('.')) return null
+  let path: string
+  if (hint.includes('/')) {
+    path = hint.replace(/\.(?:h|hh|hpp|hxx|rb|php|sh|ps1|py|rs|go|java|cs)$/i, '')
+  } else if (/^[A-Za-z_]\w*(?:(?:\.|::|\\)(?:[A-Za-z_]\w*|\*))+$/.test(hint)) {
+    path = hint.replace(/::|\\|\./g, '/').replace(/^(?:crate|self|super)\//, '')
+  } else {
+    return null
+  }
+  path = path.replace(/\/\*$/, '').toLowerCase()
+  return path.includes('/') ? path : null
+}
+
+/** `new Cls(...).` / `new Cls<T>(...)?.` right before a member access. */
+function newInstanceRe(className: string): RegExp {
+  const escaped = className.replace(/[$]/g, '\\$')
+  return new RegExp(String.raw`\bnew\s+` + escaped + String.raw`\s*(?:<[^>]*>)?\([^;]*\)\s*\??\.\s*$`)
+}
+
+/** Longest suffix of `path` (2+ segments) present in the index; ambiguous (-1) -> undefined. */
+function uniqueSuffix(index: Map<string, number>, path: string): number | undefined {
+  const parts = path.split('/').filter(Boolean)
+  for (let i = 0; i <= parts.length - 2; i++) {
+    const v = index.get(parts.slice(i).join('/'))
+    if (v !== undefined) return v === -1 ? undefined : v
+  }
+  return undefined
 }
 
 export type OutlineScope = 'topo' | 'exportado' | 'tudo'
@@ -80,6 +125,41 @@ export interface SymbolSlice {
   docSummary: string
   tokens: number
   sliceText: string
+  /** Body hash of the slice: pass it back as `expected_hash` to edit_symbol. */
+  hash: string
+}
+
+export interface RepoMapResult {
+  ok: boolean
+  reason?: string
+  markdown: string
+  files: Array<{ path: string; score: number; symbols: number }>
+  tokens: number
+  omittedFiles?: number
+}
+
+export type RefConfidence = 'same_file' | 'imported' | 'name_only'
+
+export interface ReferenceHit {
+  relPath: string
+  line: number
+  col: number
+  kind: string
+  confidence: RefConfidence
+  /** Innermost non-local symbol around the usage (qualified suffix), if any. */
+  inSymbol?: string
+  text: string
+}
+
+export interface ReferencesResult {
+  ok: boolean
+  reason?: string
+  candidates?: string[]
+  target?: { qualifiedName: string; relPath: string; startLine: number; kind: string; scope: string }
+  total?: number
+  byConfidence?: Record<RefConfidence, number>
+  references?: ReferenceHit[]
+  truncated?: boolean
 }
 
 export interface TextHit {
@@ -102,13 +182,17 @@ export class RepositoryShard {
   private cachedGraph: CsrGraph | null = null
   private lastSyncEpochMs = 0
   private lastSyncAtIso = ''
-  private needsFullReextract = false
+  /** Extractor version the stored rows were built with (meta), compared on every sync. */
+  private stampedVersion: string | undefined
 
   constructor(repositoryPath: string, storageRoot: string) {
     this.repositoryPath = resolve(repositoryPath)
     mkdirSync(storageRoot, { recursive: true })
-    const slug = this.computeRepoSlug(this.repositoryPath)
-    this.shardPath = join(storageRoot, `shard-${slug}-v${SHARD_SCHEMA_VERSION}.sqlite`)
+    const slug = RepositoryShard.computeRepoSlug(this.repositoryPath)
+    // Processes with and without the tree-sitter layer extract differently: separate files,
+    // so they never take turns re-extracting the same shard.
+    const mode = treeSitterStatus().ready ? '-tsw' : ''
+    this.shardPath = join(storageRoot, `shard-${slug}-v${SHARD_SCHEMA_VERSION}${mode}.sqlite`)
     this.db = new DatabaseSync(this.shardPath)
     this.firewall = new AdmissionFirewall(this.repositoryPath)
     this.extractor = new PolyglotExtractor()
@@ -116,7 +200,7 @@ export class RepositoryShard {
     const versionRow = this.db
       .prepare("SELECT value FROM meta WHERE key = 'extractor_version'")
       .get() as { value: string } | undefined
-    this.needsFullReextract = versionRow?.value !== EXTRACTOR_VERSION
+    this.stampedVersion = versionRow?.value
   }
 
   /**
@@ -144,7 +228,12 @@ export class RepositoryShard {
     return { ok: true, relPath: relative(this.repositoryPath, resolve(trimmed)).split(sep).join('/') }
   }
 
-  private computeRepoSlug(repoPath: string): string {
+  /** File name of this repository's shard for a given schema version and mode. */
+  static shardFileName(repoPath: string, schemaVersion: number = SHARD_SCHEMA_VERSION, treeSitter = false): string {
+    return `shard-${RepositoryShard.computeRepoSlug(resolve(repoPath))}-v${schemaVersion}${treeSitter ? '-tsw' : ''}.sqlite`
+  }
+
+  private static computeRepoSlug(repoPath: string): string {
     const cleanName = repoPath
       .replace(/^[A-Za-z]:[\\/]/, '')
       .replace(/[^A-Za-z0-9_-]+/g, '-')
@@ -164,6 +253,7 @@ export class RepositoryShard {
       PRAGMA journal_size_limit = 33554432;
       PRAGMA temp_store = MEMORY;
       PRAGMA mmap_size = 67108864;
+      PRAGMA cache_size = -65536;
 
       CREATE TABLE IF NOT EXISTS symbol_locks (
         qualified_name TEXT PRIMARY KEY,
@@ -263,6 +353,16 @@ export class RepositoryShard {
         path_pattern TEXT NOT NULL,
         framework TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
+
+      -- Inverted index of usages: which files use a name. Positions stay in the file's CAS
+      -- payload (refs), read only for the candidate files of a find_references query.
+      CREATE TABLE IF NOT EXISTS ref_names (
+        name TEXT NOT NULL,
+        file_id INTEGER NOT NULL,
+        PRIMARY KEY (name, file_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_ref_names_file ON ref_names(file_id);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
         sym_id UNINDEXED,
@@ -332,7 +432,8 @@ export class RepositoryShard {
     elapsedMs: number
   } {
     const now = Date.now()
-    if (this.needsFullReextract) {
+    // Compared per sync: the optional tree-sitter layer may finish loading after the shard opens.
+    if (this.stampedVersion !== extractorVersion()) {
       force = true
       // Signatures recorded by an older extractor have another format: comparing them would be noise.
       this.db.exec('DELETE FROM symbol_history')
@@ -390,8 +491,12 @@ export class RepositoryShard {
       const delSymbolsByFile = this.db.prepare('DELETE FROM symbols WHERE file_id = ?')
       const delEdgesByFile = this.db.prepare('DELETE FROM raw_edges WHERE src_file_id = ?')
       const delRoutesByFile = this.db.prepare('DELETE FROM routes WHERE file_id = ?')
-      const delFtsSymByFile = this.db.prepare('DELETE FROM fts_symbols WHERE file_id = ?')
-      const delFtsFileById = this.db.prepare('DELETE FROM fts_files WHERE file_id = ?')
+      // FTS rows use rowid = sym_id / file_id: deleting by an UNINDEXED column scanned the whole
+      // FTS table once per file (quadratic indexing). Must run before the symbols are deleted.
+      const delFtsSymByFile = this.db.prepare(
+        'DELETE FROM fts_symbols WHERE rowid IN (SELECT sym_id FROM symbols WHERE file_id = ?)',
+      )
+      const delFtsFileById = this.db.prepare('DELETE FROM fts_files WHERE rowid = ?')
 
       const insertSymStmt = this.db.prepare(`
         INSERT INTO symbols(
@@ -402,17 +507,19 @@ export class RepositoryShard {
         RETURNING sym_id
       `)
       const insertFtsSymStmt = this.db.prepare(`
-        INSERT INTO fts_symbols(sym_id, file_id, rel_path, name, signature, doc_summary, slice_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO fts_symbols(rowid, sym_id, file_id, rel_path, name, signature, doc_summary, slice_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `)
       const insertFtsFileStmt = this.db.prepare(`
-        INSERT INTO fts_files(file_id, rel_path, headings, summary, body_text)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO fts_files(rowid, file_id, rel_path, headings, summary, body_text)
+        VALUES (?, ?, ?, ?, ?, ?)
       `)
       const insertEdgeStmt = this.db.prepare(`
         INSERT INTO raw_edges(src_file_id, src_sym_name, dst_name, dst_path_hint, kind, weight)
         VALUES (?, ?, ?, ?, ?, ?)
       `)
+      const delRefNamesByFile = this.db.prepare('DELETE FROM ref_names WHERE file_id = ?')
+      const insertRefNameStmt = this.db.prepare('INSERT OR IGNORE INTO ref_names(name, file_id) VALUES (?, ?)')
       const insertRouteStmt = this.db.prepare(`
         INSERT INTO routes(file_id, rel_path, symbol_name, direction, method, path_pattern, framework)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -475,13 +582,15 @@ export class RepositoryShard {
           }
         }
 
+        delFtsSymByFile.run(fileId)
+        delFtsFileById.run(fileId)
         delSymbolsByFile.run(fileId)
         delEdgesByFile.run(fileId)
         delRoutesByFile.run(fileId)
-        delFtsSymByFile.run(String(fileId))
-        delFtsFileById.run(String(fileId))
+        delRefNamesByFile.run(fileId)
 
         insertFtsFileStmt.run(
+          fileId,
           String(fileId),
           scanned.relPath.replace(/[/_.-]+/g, ' ') + ' ' + scanned.relPath,
           extraction.headings,
@@ -510,6 +619,7 @@ export class RepositoryShard {
           ) as { sym_id: number }
 
           insertFtsSymStmt.run(
+            symRow.sym_id,
             String(symRow.sym_id),
             String(fileId),
             scanned.relPath.replace(/[/_.-]+/g, ' '),
@@ -543,17 +653,28 @@ export class RepositoryShard {
           )
         }
 
+        if (extraction.refs?.length) {
+          const names = new Set<string>()
+          for (const r of extraction.refs) names.add(r[0])
+          for (const nm of names) insertRefNameStmt.run(nm, fileId)
+        }
+
         updatedFiles++
+        if (updatedFiles % SYNC_BATCH_FILES === 0) {
+          this.db.exec('COMMIT')
+          this.db.exec('BEGIN IMMEDIATE')
+        }
       }
 
       // Remove deleted files
       for (const prev of existingRows) {
         if (!seenPaths.has(prev.rel_path)) {
+          delFtsSymByFile.run(prev.file_id)
+          delFtsFileById.run(prev.file_id)
           delSymbolsByFile.run(prev.file_id)
           delEdgesByFile.run(prev.file_id)
           delRoutesByFile.run(prev.file_id)
-          delFtsSymByFile.run(String(prev.file_id))
-          delFtsFileById.run(String(prev.file_id))
+          delRefNamesByFile.run(prev.file_id)
           this.db.prepare('DELETE FROM files WHERE file_id = ?').run(prev.file_id)
           removedFiles++
         }
@@ -568,14 +689,14 @@ export class RepositoryShard {
       if (updatedFiles > 0 || removedFiles > 0 || force) {
         setMeta.run('last_indexed_at', new Date().toISOString())
       }
-      if (force) setMeta.run('extractor_version', EXTRACTOR_VERSION)
+      if (force) setMeta.run('extractor_version', extractorVersion())
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
       throw err
     }
 
-    if (force) this.needsFullReextract = false
+    if (force) this.stampedVersion = extractorVersion()
     this.lastSyncAtIso = new Date().toISOString()
     if (updatedFiles > 0 || removedFiles > 0 || force) this.maybeCheckpointWal(true)
     this.lastSyncEpochMs = Date.now()
@@ -591,7 +712,7 @@ export class RepositoryShard {
 
   /** The payload carries path-qualified names, so identical files at two paths get two entries. */
   private casKey(contentHash: string, relPath: string): string {
-    return `${EXTRACTOR_VERSION}:${relPath}:${contentHash}`
+    return `${extractorVersion()}:${relPath}:${contentHash}`
   }
 
   /**
@@ -621,6 +742,49 @@ export class RepositoryShard {
     return true
   }
 
+  /** Sync now, ignoring the throttle (before verifying locks or editing). */
+  syncNow(): void {
+    this.lastSyncEpochMs = 0
+    this.sync(false)
+  }
+
+  /** Re-extracts one file even if a rewrite kept its mtime and size (edit_symbol). */
+  reindexFile(relPath: string): void {
+    this.reindexFiles([relPath])
+  }
+
+  /** Same for several files with a single sync (rename_symbol). */
+  reindexFiles(relPaths: string[]): void {
+    const stmt = this.db.prepare('UPDATE files SET mtime_ms = -1 WHERE rel_path = ?')
+    for (const rel of relPaths) stmt.run(rel)
+    this.syncNow()
+  }
+
+  /** Non-local symbols of a file that start at `line`, widest first. */
+  symbolsStartingAt(relPath: string, line: number): Array<{ qualifiedName: string; startLine: number; endLine: number; hash: string }> {
+    return this.db
+      .prepare(
+        `SELECT qualified_name AS qualifiedName, start_line AS startLine, end_line AS endLine, body_hash AS hash
+         FROM symbols WHERE rel_path = ? AND start_line = ? AND scope != 'local'
+         ORDER BY (end_line - start_line) DESC`,
+      )
+      .all(relPath, line) as Array<{ qualifiedName: string; startLine: number; endLine: number; hash: string }>
+  }
+
+  /** Current signature/body hash of a symbol by qualified name (with or without path) or name. */
+  findSymbolBaseline(query: string): { signature: string; bodyHash: string; relPath: string; qualifiedName: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT signature, body_hash AS bodyHash, rel_path AS relPath, qualified_name AS qualifiedName
+         FROM symbols WHERE qualified_name = ? OR qualified_name LIKE '%#' || ? ESCAPE '\\' OR name = ?
+         ORDER BY CASE WHEN qualified_name = ? THEN 0 WHEN name = ? THEN 2 ELSE 1 END LIMIT 1`,
+      )
+      .get(query, likeEscape(query), query, query, query) as
+      | { signature: string; bodyHash: string; relPath: string; qualifiedName: string }
+      | undefined
+  }
+
+  /** @deprecated locks live in the engine (telemetry.sqlite); kept for embedders of the old API. */
   lockSymbols(
     locks: Array<{ qualifiedName: string; relPath: string; mode: 'allow_body_only' | 'frozen' }>,
   ): number {
@@ -714,7 +878,7 @@ export class RepositoryShard {
           `SELECT f.rel_path AS relPath, c.payload_json AS payload
            FROM files f JOIN cas_extractions c ON c.content_hash = ? || f.rel_path || ':' || f.content_hash`,
         )
-        .all(`${EXTRACTOR_VERSION}:`) as Array<{ relPath: string; payload: string }>
+        .all(`${extractorVersion()}:`) as Array<{ relPath: string; payload: string }>
       for (const row of rows) {
         const ext = JSON.parse(row.payload) as ExtractionResult
         for (const f of ext.slopFindings ?? []) slops.push({ ...f, relPath: row.relPath })
@@ -726,10 +890,24 @@ export class RepositoryShard {
   private rebuildResolvedFileEdges(): void {
     this.db.exec('DELETE FROM resolved_edges')
 
-    const files = this.db.prepare('SELECT file_id, rel_path FROM files').all() as Array<{
+    const files = this.db.prepare('SELECT file_id, rel_path, lang FROM files').all() as Array<{
       file_id: number
       rel_path: string
+      lang: string
     }>
+    const langById = new Map(files.map((f) => [f.file_id, f.lang]))
+    // Workspace packages (monorepos, self-references): `name` of every indexed package.json.
+    const workspacePackages: Array<{ name: string; dir: string }> = []
+    for (const f of files) {
+      if (!/(?:^|\/)package\.json$/.test(f.rel_path)) continue
+      try {
+        const pkg = JSON.parse(readFileSync(join(this.repositoryPath, ...f.rel_path.split('/')), 'utf8')) as { name?: unknown }
+        if (typeof pkg.name === 'string' && pkg.name) workspacePackages.push({ name: pkg.name, dir: posix.dirname(f.rel_path) })
+      } catch {
+        // not JSON / unreadable: not a package
+      }
+    }
+    workspacePackages.sort((a, b) => b.name.length - a.name.length)
     const symbols = this.db.prepare('SELECT file_id, name FROM symbols').all() as Array<{
       file_id: number
       name: string
@@ -747,10 +925,38 @@ export class RepositoryShard {
     const fileByBasename = new Map<string, number[]>()
     const fileByRelNoExt = new Map<string, number>()
 
+    // Path suffixes with 2+ segments (`acme/invoice`), for module-style imports. `__init__.py`
+    // and `mod.rs` also answer for their directory. -1 marks an ambiguous suffix.
+    const fileBySuffix = new Map<string, number>()
+    const dirBySuffix = new Map<string, number>()
+    const dirIds = new Map<string, number>()
+    const filesByDir = new Map<number, number[]>()
+    const addSuffixes = (index: Map<string, number>, path: string, id: number) => {
+      const parts = path.split('/')
+      for (let i = parts.length - 2; i >= 0; i--) {
+        const key = parts.slice(i).join('/')
+        const cur = index.get(key)
+        index.set(key, cur === undefined || cur === id ? id : -1)
+      }
+    }
+
     for (const f of files) {
       fileById.set(f.file_id, f.rel_path)
       const noExt = f.rel_path.replace(/\.\w+$/, '').toLowerCase()
       fileByRelNoExt.set(noExt, f.file_id)
+      addSuffixes(fileBySuffix, noExt.replace(/\/(?:__init__|mod)$/, ''), f.file_id)
+      const dir = posix.dirname(f.rel_path).toLowerCase()
+      if (dir !== '.') {
+        let dirId = dirIds.get(dir)
+        if (dirId === undefined) {
+          dirId = dirIds.size
+          dirIds.set(dir, dirId)
+          addSuffixes(dirBySuffix, dir, dirId)
+        }
+        const list = filesByDir.get(dirId) ?? []
+        if (list.length < 12) list.push(f.file_id)
+        filesByDir.set(dirId, list)
+      }
       const base = (f.rel_path.split('/').pop() ?? f.rel_path).replace(/\.\w+$/, '').toLowerCase()
       const list = fileByBasename.get(base) ?? []
       list.push(f.file_id)
@@ -794,6 +1000,39 @@ export class RepositoryShard {
             continue
           }
         }
+        const jsLike = langById.get(e.src_file_id) === 'typescript' || langById.get(e.src_file_id) === 'javascript'
+        // `pkg` / `pkg/sub` of a package of this workspace: its dir, its src/, index files.
+        if (jsLike && !e.dst_path_hint.startsWith('.')) {
+          const spec = e.dst_path_hint
+          const pkg = workspacePackages.find((p) => spec === p.name || spec.startsWith(`${p.name}/`))
+          if (pkg) {
+            const sub = spec === pkg.name ? '' : spec.slice(pkg.name.length + 1).replace(/\.[cm]?[jt]sx?$/, '')
+            const base = pkg.dir === '.' ? '' : `${pkg.dir}/`
+            const candidates = sub
+              ? [`${base}src/${sub}`, `${base}${sub}`, `${base}src/${sub}/index`, `${base}${sub}/index`]
+              : [`${base}src/index`, `${base}index`, `${base}src/main`]
+            const hit = candidates.map((c) => fileByRelNoExt.get(c.toLowerCase())).find((id) => id !== undefined)
+            if (hit !== undefined) {
+              addEdge(e.src_file_id, hit, Math.max(1.5, e.weight * 1.5), true)
+              continue
+            }
+          }
+        }
+        // Module paths of the other languages: `com.acme.Invoice`, `a.b`, `crate::x::y`,
+        // `App\Models\User`, `github.com/org/repo/pkg/util` -> path suffix of a file or package dir.
+        const modPath = moduleHintToPath(e.dst_path_hint)
+        if (modPath) {
+          const fileHit = uniqueSuffix(fileBySuffix, modPath) ?? uniqueSuffix(fileBySuffix, posix.dirname(modPath))
+          if (fileHit !== undefined) {
+            addEdge(e.src_file_id, fileHit, Math.max(1.5, e.weight * 1.5), true)
+            continue
+          }
+          const dirFiles = uniqueSuffix(dirBySuffix, modPath)
+          if (dirFiles !== undefined) {
+            for (const id of filesByDir.get(dirFiles) ?? []) addEdge(e.src_file_id, id, Math.max(1.2, e.weight), true)
+            continue
+          }
+        }
         const cleanHint = e.dst_path_hint
           .replace(/^\.+\//, '')
           .replace(/\.\w+$/, '')
@@ -805,7 +1044,10 @@ export class RepositoryShard {
         }
         const baseHint = cleanHint.split('/').pop() ?? cleanHint
         const baseTargets = fileByBasename.get(baseHint)
-        if (baseTargets && baseTargets.length === 1) {
+        // A bare npm specifier (`zod`, `react`, `@scope/x`) is a package, not a local file that
+        // happens to share its basename.
+        const barePackage = jsLike && !e.dst_path_hint.startsWith('.') && !/\.[cm]?[jt]sx?$/.test(e.dst_path_hint)
+        if (!barePackage && baseTargets && baseTargets.length === 1) {
           addEdge(e.src_file_id, baseTargets[0], Math.max(1.5, e.weight), true)
           continue
         }
@@ -913,7 +1155,7 @@ export class RepositoryShard {
             return false
           }
         } else if (cleanCorpus === 'code') {
-          if (!['typescript', 'javascript', 'python', 'go', 'powershell'].includes(l)) {
+          if (!CODE_LANGUAGES.has(l)) {
             return false
           }
         }
@@ -1138,6 +1380,380 @@ export class RepositoryShard {
     return [...tests].sort()
   }
 
+  /**
+   * Usages of one symbol across the repository. Confidence: `same_file`; `imported` when the
+   * using file imports the target's file (resolved import edge or a named import); `name_only`
+   * otherwise. Files that declare their own symbol with that name are skipped (shadowing).
+   * Member symbols (`Class.method`) only count member accesses outside their own file.
+   */
+  findReferences(symbolQuery: string, opts: { path?: string; limit?: number; includeNameOnly?: boolean } = {}): ReferencesResult {
+    this.sync(false)
+    const matches = this.readSymbol(symbolQuery, { path: opts.path })
+    if (matches.length === 0) return { ok: false, reason: `nenhum símbolo '${symbolQuery}' no índice de ${this.repositoryPath}` }
+    const bareQuery = symbolQuery.trim().replace(/^.*#/, '')
+    const exact = matches.filter((m) => m.qualifiedName.slice(m.relPath.length + 1) === bareQuery)
+    const pool = exact.length > 0 ? exact : matches.filter((m) => m.scope !== 'local')
+    if (pool.length !== 1) {
+      return {
+        ok: false,
+        reason: `'${symbolQuery}' é ambíguo (${pool.length} candidatos): use caminho#Nome`,
+        candidates: (pool.length ? pool : matches).map((m) => m.qualifiedName),
+      }
+    }
+    const target = pool[0]
+    const name = target.name
+    const isMember = target.scope === 'member'
+    const targetFile = this.db.prepare('SELECT file_id FROM files WHERE rel_path = ?').get(target.relPath) as { file_id: number } | undefined
+    const targetFileId = targetFile?.file_id ?? -1
+
+    const files = this.db
+      .prepare(
+        `SELECT f.file_id AS fileId, f.rel_path AS relPath, f.content_hash AS contentHash, f.lang AS lang
+         FROM ref_names r JOIN files f ON f.file_id = r.file_id WHERE r.name = ?`,
+      )
+      .all(name) as Array<{ fileId: number; relPath: string; contentHash: string; lang: string }>
+    // `imported` = a resolved import edge to the target's file (a named import of the same name
+    // from ANOTHER module refers to another declaration: that file is skipped below).
+    const importsTarget = new Set<number>(
+      (
+        this.db.prepare('SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2').all(targetFileId) as Array<{
+          id: number
+        }>
+      ).map((r) => r.id),
+    )
+    // Barrels (index.ts / __init__.py / mod.rs) re-export: importing one counts as importing the
+    // target when the barrel itself imports it (two levels: core/index -> v4/index).
+    {
+      const barrelOf = this.db.prepare(
+        `SELECT f.file_id AS id FROM files f JOIN resolved_edges e ON e.src_file_id = f.file_id
+         WHERE e.dst_file_id = ? AND e.weight >= 1.2
+           AND (f.rel_path LIKE '%/index.%' OR f.rel_path LIKE 'index.%' OR f.rel_path LIKE '%__init__.py' OR f.rel_path LIKE '%/mod.rs')`,
+      )
+      const importersOf = this.db.prepare('SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2')
+      let frontier = [targetFileId]
+      const seenBarrels = new Set<number>()
+      for (let level = 0; level < 2 && frontier.length > 0; level++) {
+        const next: number[] = []
+        for (const id of frontier) {
+          for (const b of barrelOf.all(id) as Array<{ id: number }>) {
+            if (seenBarrels.has(b.id)) continue
+            seenBarrels.add(b.id)
+            next.push(b.id)
+            for (const imp of importersOf.all(b.id) as Array<{ id: number }>) importsTarget.add(imp.id)
+          }
+        }
+        frontier = next
+      }
+    }
+    const importsNameElsewhere = new Set<number>(
+      (
+        this.db.prepare("SELECT DISTINCT src_file_id AS id FROM raw_edges WHERE kind = 'imports' AND dst_name = ?").all(name) as Array<{ id: number }>
+      )
+        .map((r) => r.id)
+        .filter((id) => !importsTarget.has(id) && id !== targetFileId),
+    )
+    // A member's bare-name usages only count inside its own class body.
+    const suffix = target.qualifiedName.slice(target.relPath.length + 1)
+    const classRange =
+      isMember && suffix.includes('.')
+        ? (this.db
+            .prepare('SELECT start_line AS s, end_line AS e FROM symbols WHERE file_id = ? AND qualified_name = ?')
+            .get(targetFileId, `${target.relPath}#${suffix.replace(/\.[^.]+$/, '')}`) as { s: number; e: number } | undefined)
+        : undefined
+    const JS_LIKE = new Set(['typescript', 'javascript'])
+    // Same class with a static AND an instance member of this name: the receiver tells them
+    // apart (`Cls.x` -> static, `this.x` / `obj.x` -> instance).
+    let staticTwin: { wantStatic: boolean; className: string } | undefined
+    if (isMember && suffix.includes('.')) {
+      const twins = this.db
+        .prepare("SELECT signature FROM symbols WHERE file_id = ? AND name = ? AND scope = 'member' AND qualified_name LIKE ? ESCAPE '\\'")
+        .all(targetFileId, name, `${likeEscape(target.relPath)}#${likeEscape(suffix.replace(/\.[^.]+$/, ''))}.%`) as Array<{ signature: string }>
+      const statics = twins.filter((t) => /^static\b/.test(t.signature)).length
+      if (statics > 0 && statics < twins.length) {
+        staticTwin = { wantStatic: /^static\b/.test(target.signature), className: suffix.replace(/\.[^.]+$/, '').split('.').pop() ?? '' }
+      }
+    }
+    const lineCache = new Map<string, string[]>()
+    const lineOf = (rel: string, line: number): string => {
+      let lines = lineCache.get(rel)
+      if (!lines) {
+        try {
+          lines = readFileSync(join(this.repositoryPath, ...rel.split('/')), 'utf8').split(/\r?\n/)
+        } catch {
+          lines = []
+        }
+        lineCache.set(rel, lines)
+      }
+      return lines[line - 1] ?? ''
+    }
+    const declaresSameName = new Set<number>(
+      (
+        this.db.prepare("SELECT DISTINCT file_id AS id FROM symbols WHERE name = ? AND scope != 'local'").all(name) as Array<{ id: number }>
+      ).map((r) => r.id),
+    )
+    const getCas = this.db.prepare('SELECT payload_json FROM cas_extractions WHERE content_hash = ?')
+    const symbolsOf = this.db.prepare(
+      "SELECT qualified_name AS q, rel_path AS p, start_line AS s, end_line AS e FROM symbols WHERE file_id = ? AND scope != 'local'",
+    )
+
+    const rank: Record<RefConfidence, number> = { same_file: 0, imported: 1, name_only: 2 }
+    const hits: ReferenceHit[] = []
+    const byConfidence: Record<RefConfidence, number> = { same_file: 0, imported: 0, name_only: 0 }
+    const IMPLICIT_THIS = new Set(['java', 'csharp', 'cpp', 'ruby'])
+    const OWN_RECEIVERS = new Set(['this', '$this', 'self', 'super', 'cls'])
+    const className = suffix.includes('.') ? (suffix.replace(/\.[^.]+$/, '').split('.').pop() ?? '') : ''
+    const receiverOf = (rel: string, line: number, col: number) =>
+      /([A-Za-z_$][\w$]*)\s*(?:\?\.|\.|->|::)\s*$/.exec(lineOf(rel, line).slice(0, col - 1))?.[1]
+    // `import * as ns from '...'` aliases of a JS/TS file: `ns.name` reaches a module symbol.
+    const nsAliases = (rel: string): Set<string> => {
+      lineOf(rel, 1)
+      const out = new Set<string>()
+      for (const l of lineCache.get(rel) ?? []) {
+        const m = /\bimport\s+(?:type\s+)?\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(l)
+        if (m) out.add(m[1])
+      }
+      return out
+    }
+    for (const f of files) {
+      const sameFile = f.fileId === targetFileId
+      if (!sameFile && declaresSameName.has(f.fileId) && !isMember) continue
+      if (!sameFile && !isMember && importsNameElsewhere.has(f.fileId)) continue
+      const fileConfidence: RefConfidence = sameFile ? 'same_file' : importsTarget.has(f.fileId) ? 'imported' : 'name_only'
+      const row = getCas.get(this.casKey(f.contentHash, f.relPath)) as { payload_json: string } | undefined
+      if (!row) continue
+      const refs = (JSON.parse(row.payload_json) as ExtractionResult).refs ?? []
+      let aliases: Set<string> | undefined
+      for (const r of refs) {
+        if (r[0] !== name) continue
+        const kind = r[3]
+        const memberKind = kind === 'member' || kind === 'member_call'
+        let confidence = fileConfidence
+        if (isMember) {
+          if (memberKind) {
+            // Without types, `obj.x` is only linked when the receiver is the class itself.
+            const receiver = receiverOf(f.relPath, r[1], r[2])
+            const head = lineOf(f.relPath, r[1]).slice(0, r[2] - 1)
+            // `this.x`, `Cls.x`, or a fresh instance `new Cls(...).x`
+            const own =
+              (receiver !== undefined && (OWN_RECEIVERS.has(receiver) || receiver === className)) ||
+              (className !== '' && newInstanceRe(className).test(head))
+            if (staticTwin && (receiver === staticTwin.className) !== staticTwin.wantStatic) continue
+            if (!own) confidence = 'name_only'
+          } else {
+            // a bare `x` is the member only inside its class, in languages with an implicit `this`
+            const inClass =
+              sameFile && IMPLICIT_THIS.has(f.lang) && classRange !== undefined && r[1] >= classRange.s && r[1] <= classRange.e && kind !== 'import'
+            if (!inClass) continue
+          }
+        } else if (memberKind) {
+          if (sameFile) continue // `obj.add` in the defining file is another object's property
+          if (JS_LIKE.has(f.lang)) {
+            // JS/TS reach module symbols through `ns.add` only with `import * as ns`
+            aliases ??= nsAliases(f.relPath)
+            const receiver = receiverOf(f.relPath, r[1], r[2])
+            if (!receiver || !aliases.has(receiver)) continue
+          }
+        }
+        if (confidence === 'name_only' && opts.includeNameOnly === false) continue
+        hits.push({ relPath: f.relPath, line: r[1], col: r[2], kind, confidence, text: '' })
+        byConfidence[confidence]++
+      }
+    }
+    hits.sort((a, b) => rank[a.confidence] - rank[b.confidence] || a.relPath.localeCompare(b.relPath) || a.line - b.line || a.col - b.col)
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000))
+    const shown = hits.slice(0, limit)
+    // Line text and enclosing symbol, only for what is returned.
+    const contentCache = new Map<string, string[]>()
+    const symCache = new Map<string, Array<{ q: string; p: string; s: number; e: number }>>()
+    for (const h of shown) {
+      let lines = contentCache.get(h.relPath)
+      if (!lines) {
+        try {
+          lines = readFileSync(join(this.repositoryPath, ...h.relPath.split('/')), 'utf8').split(/\r?\n/)
+        } catch {
+          lines = []
+        }
+        contentCache.set(h.relPath, lines)
+      }
+      h.text = (lines[h.line - 1] ?? '').trim().slice(0, 200)
+      let syms = symCache.get(h.relPath)
+      if (!syms) {
+        const fid = files.find((f) => f.relPath === h.relPath)?.fileId ?? -1
+        syms = symbolsOf.all(fid) as Array<{ q: string; p: string; s: number; e: number }>
+        symCache.set(h.relPath, syms)
+      }
+      let best: { q: string; p: string; s: number; e: number } | undefined
+      for (const sy of syms) if (sy.s <= h.line && sy.e >= h.line && (!best || sy.e - sy.s < best.e - best.s)) best = sy
+      if (best) h.inSymbol = best.q.slice(best.p.length + 1)
+    }
+    return {
+      ok: true,
+      target: { qualifiedName: target.qualifiedName, relPath: target.relPath, startLine: target.startLine, kind: target.kind, scope: target.scope },
+      total: hits.length,
+      byConfidence,
+      references: shown,
+      truncated: hits.length > shown.length,
+    }
+  }
+
+  /**
+   * Orientation map without a query (Aider-style): code files ranked by PageRank over the
+   * forward dependency graph (importer -> imported), optionally personalized to `focus` files,
+   * each with its exported signatures, filled until the token budget.
+   */
+  repoMap(opts: { budget?: number; focus?: string[]; path?: string; includeTests?: boolean } = {}): RepoMapResult {
+    this.sync(false)
+    const budget = Math.max(200, Math.min(opts.budget ?? 1500, 20_000))
+    const { graph, indexToFile } = this.getCsrGraph()
+    const N = graph.nodeCount
+    const isTest = (p: string) => /(?:^|\/)(?:tests?|__tests__|spec)\/|[._-](?:test|spec)\.\w+$|_test\.go$|(?:^|\/)test_[^/]+\.py$/i.test(p)
+    const pathFilter = opts.path ? this.resolveRepoPath(opts.path) : null
+    if (pathFilter && !pathFilter.ok) return { ok: false, reason: pathFilter.reason, markdown: '', files: [], tokens: 0 }
+    const prefix = pathFilter?.ok ? pathFilter.relPath.toLowerCase() : ''
+    const eligible = new Uint8Array(N)
+    for (let i = 0; i < N; i++) {
+      const f = indexToFile[i]
+      const rel = f.relPath.toLowerCase()
+      if (!CODE_LANGUAGES.has(f.lang)) continue
+      if (!opts.includeTests && isTest(f.relPath)) continue
+      if (prefix && rel !== prefix && !rel.startsWith(prefix.endsWith('/') ? prefix : prefix + '/')) continue
+      eligible[i] = 1
+    }
+    const focusIdx = new Set<number>()
+    for (const q of opts.focus ?? []) {
+      const r = this.resolveRepoPath(q)
+      if (!r.ok) continue
+      const idx = indexToFile.findIndex((f) => f.relPath.toLowerCase() === r.relPath.toLowerCase())
+      if (idx >= 0) focusIdx.add(idx)
+    }
+    // Teleport: focus files when given, otherwise every eligible file.
+    const teleport = new Float64Array(N)
+    let tSum = 0
+    for (let i = 0; i < N; i++) {
+      const w = focusIdx.size > 0 ? (focusIdx.has(i) ? 1 : 0) : eligible[i]
+      teleport[i] = w
+      tSum += w
+    }
+    if (tSum === 0) return { ok: true, markdown: '', files: [], tokens: 0, reason: 'nenhum arquivo de código no escopo' }
+    for (let i = 0; i < N; i++) teleport[i] /= tSum
+    let rank = Float64Array.from(teleport)
+    const next = new Float64Array(N)
+    const d = 0.85
+    // Around focus files, their dependents matter too: reverse edges carry rank at half weight.
+    const rev = focusIdx.size > 0 ? 0.5 : 0
+    const outW = new Float64Array(N)
+    for (let u = 0; u < N; u++) {
+      for (let k = graph.rowPtr[u]; k < graph.rowPtr[u + 1]; k++) outW[u] += graph.weights[k]
+      if (rev) for (let k = graph.reverseRowPtr[u]; k < graph.reverseRowPtr[u + 1]; k++) outW[u] += graph.reverseWeights[k] * rev
+    }
+    for (let iter = 0; iter < 30; iter++) {
+      let dangling = 0
+      next.fill(0)
+      for (let u = 0; u < N; u++) {
+        if (outW[u] <= 0) {
+          dangling += rank[u]
+          continue
+        }
+        const share = (d * rank[u]) / outW[u]
+        for (let k = graph.rowPtr[u]; k < graph.rowPtr[u + 1]; k++) next[graph.colIdx[k]] += share * graph.weights[k]
+        if (rev) for (let k = graph.reverseRowPtr[u]; k < graph.reverseRowPtr[u + 1]; k++) next[graph.reverseColIdx[k]] += share * graph.reverseWeights[k] * rev
+      }
+      for (let i = 0; i < N; i++) next[i] += ((1 - d) + d * dangling) * teleport[i]
+      rank = Float64Array.from(next)
+    }
+
+    // Focus files lead (they are what the map is about), then everything else by rank.
+    const order = [...rank.keys()]
+      .filter((i) => eligible[i] || focusIdx.has(i))
+      .sort((a, b) => Number(focusIdx.has(b)) - Number(focusIdx.has(a)) || rank[b] - rank[a])
+    const symStmt = this.db.prepare(
+      `SELECT name, kind, scope, parent, signature, start_line AS line FROM symbols
+       WHERE file_id = ? AND scope != 'local' AND exported = 1 AND kind != 'section'
+       ORDER BY start_line ASC`,
+    )
+    const tok = (s: string) => Math.ceil(s.length / 4) + 1
+    const out: string[] = []
+    const files: RepoMapResult['files'] = []
+    let used = 0
+    const MAX_SYMS = 14
+    for (const i of order) {
+      const f = indexToFile[i]
+      const syms = symStmt.all(f.fileId) as Array<{ name: string; kind: string; scope: string; parent: string | null; signature: string; line: number }>
+      const header = `${f.relPath}${focusIdx.has(i) ? '  (foco)' : ''}`
+      const lines: string[] = []
+      for (const s of syms.slice(0, MAX_SYMS)) {
+        let sig = s.signature.replace(/\s+/g, ' ').trim()
+        if (s.parent && sig.startsWith(`${s.parent}.`)) sig = sig.slice(s.parent.length + 1)
+        if (s.parent && sig.includes(` ${s.parent}.`)) sig = sig.replace(` ${s.parent}.`, ' ')
+        lines.push(`${s.scope === 'member' ? '    ' : '  '}${sig.length > 100 ? `${sig.slice(0, 99)}…` : sig}`)
+      }
+      if (syms.length > MAX_SYMS) lines.push(`  … +${syms.length - MAX_SYMS} símbolos (file_outline)`)
+      const cost = tok(header) + lines.reduce((n, l) => n + tok(l), 0)
+      if (used + cost > budget) {
+        // the header alone still fits: list the file without signatures
+        if (used + tok(header) <= budget && files.length > 0) {
+          out.push(header)
+          used += tok(header)
+          files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: 0 })
+          continue
+        }
+        if (files.length === 0) {
+          out.push(header, ...lines.slice(0, Math.max(1, Math.floor((budget - tok(header)) / 12))))
+          files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: syms.length })
+        }
+        break
+      }
+      out.push(header, ...lines)
+      used += cost
+      files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: syms.length })
+    }
+    const markdown = out.join('\n')
+    return { ok: true, markdown, files, tokens: Math.ceil(markdown.length / 4), omittedFiles: Math.max(0, order.length - files.length) }
+  }
+
+  private coChangeCache: { head: string; commits: string[][] } | null = null
+
+  /**
+   * Files of the last commits (git log --name-only), cached per HEAD; null outside git.
+   * Bulk commits (> 40 files: formatting, renames, vendoring) say nothing about coupling.
+   */
+  private gitCommitFiles(): string[][] | null {
+    const run = (args: string[]) =>
+      spawnSync('git', ['-C', this.repositoryPath, '-c', 'core.quotePath=false', ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true })
+    const head = run(['rev-parse', 'HEAD'])
+    if (head.status !== 0) return null
+    const sha = head.stdout.trim()
+    if (this.coChangeCache?.head === sha) return this.coChangeCache.commits
+    const log = run(['log', '--no-merges', '--name-only', '--relative', '--format=%x1e', '-n', '500'])
+    if (log.status !== 0) return null
+    const commits = log.stdout
+      .split('\x1e')
+      .map((chunk) => chunk.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))
+      .filter((files) => files.length > 1 && files.length <= 40)
+    this.coChangeCache = { head: sha, commits }
+    return commits
+  }
+
+  /** Files that changed together with `relPaths` in recent history (>= 2 shared commits). */
+  coChanged(relPaths: string[], limit = 8): Array<{ relPath: string; commits: number; ratio: number }> | undefined {
+    const commits = this.gitCommitFiles()
+    if (!commits || relPaths.length === 0) return undefined
+    const targets = new Set(relPaths)
+    const counts = new Map<string, number>()
+    let withTarget = 0
+    for (const files of commits) {
+      if (!files.some((f) => targets.has(f))) continue
+      withTarget++
+      for (const f of files) if (!targets.has(f)) counts.set(f, (counts.get(f) ?? 0) + 1)
+    }
+    if (withTarget === 0) return []
+    return [...counts]
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, limit)
+      .map(([relPath, n]) => ({ relPath, commits: n, ratio: Math.round((n / withTarget) * 100) / 100 }))
+  }
+
   computeBlastRadius(targetSymbolOrPath: string): BlastRadiusReport {
     const t0 = performance.now()
     this.sync(false)
@@ -1164,7 +1780,9 @@ export class RepositoryShard {
       if (idx !== undefined) startNodes.push(idx)
     }
 
-    const reachable = graph.reverseReachable(startNodes, 5)
+    // Only real (resolved import) edges propagate impact: name-only links (<= 0.75) chained over
+    // 5 levels pulled in the whole component (benchmark T4: precision 37% -> see bench/).
+    const reachable = graph.reverseReachable(startNodes, 5, 1.0)
     const transitiveFiles: string[] = []
     for (const [nodeIdx, depth] of reachable.entries()) {
       if (depth > 0 && indexToFile[nodeIdx]) {
@@ -1203,6 +1821,7 @@ export class RepositoryShard {
       })),
       transitiveFiles: transitiveFiles.sort(),
       affectedTests,
+      coChanged: this.coChanged([...new Set(matchingSymFiles.map((m) => m.rel_path))].slice(0, 3)),
       crossRepoImpacts: [],
       riskLevel,
       elapsedMs: Math.round((performance.now() - t0) * 100) / 100,
@@ -1362,7 +1981,7 @@ export class RepositoryShard {
             rel_path AS relPath, name, qualified_name AS qualifiedName,
             kind, scope, start_line AS startLine, end_line AS endLine,
             signature, doc_summary AS docSummary,
-            token_estimate AS tokens, slice_text AS sliceText,
+            token_estimate AS tokens, slice_text AS sliceText, body_hash AS hash,
             CASE
               WHEN lower(qualified_name) LIKE '%#' || ? ESCAPE '\\' THEN 0
               WHEN lower(name) = ? THEN 1
@@ -1777,7 +2396,7 @@ export class RepositoryShard {
       walSizeBytes,
       lastIndexedAt: lastRow?.value ?? new Date().toISOString(),
       schemaVersion: SHARD_SCHEMA_VERSION,
-      extractorVersion: EXTRACTOR_VERSION,
+      extractorVersion: extractorVersion(),
       indexAge: this.indexAgeSummary(),
     }
   }
