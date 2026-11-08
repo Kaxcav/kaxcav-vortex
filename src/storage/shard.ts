@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
@@ -1561,6 +1562,49 @@ export class RepositoryShard {
     return { ok: true, markdown, files, tokens: Math.ceil(markdown.length / 4), omittedFiles: Math.max(0, order.length - files.length) }
   }
 
+  private coChangeCache: { head: string; commits: string[][] } | null = null
+
+  /**
+   * Files of the last commits (git log --name-only), cached per HEAD; null outside git.
+   * Bulk commits (> 40 files: formatting, renames, vendoring) say nothing about coupling.
+   */
+  private gitCommitFiles(): string[][] | null {
+    const run = (args: string[]) =>
+      spawnSync('git', ['-C', this.repositoryPath, '-c', 'core.quotePath=false', ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true })
+    const head = run(['rev-parse', 'HEAD'])
+    if (head.status !== 0) return null
+    const sha = head.stdout.trim()
+    if (this.coChangeCache?.head === sha) return this.coChangeCache.commits
+    const log = run(['log', '--no-merges', '--name-only', '--relative', '--format=%x1e', '-n', '500'])
+    if (log.status !== 0) return null
+    const commits = log.stdout
+      .split('\x1e')
+      .map((chunk) => chunk.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))
+      .filter((files) => files.length > 1 && files.length <= 40)
+    this.coChangeCache = { head: sha, commits }
+    return commits
+  }
+
+  /** Files that changed together with `relPaths` in recent history (>= 2 shared commits). */
+  coChanged(relPaths: string[], limit = 8): Array<{ relPath: string; commits: number; ratio: number }> | undefined {
+    const commits = this.gitCommitFiles()
+    if (!commits || relPaths.length === 0) return undefined
+    const targets = new Set(relPaths)
+    const counts = new Map<string, number>()
+    let withTarget = 0
+    for (const files of commits) {
+      if (!files.some((f) => targets.has(f))) continue
+      withTarget++
+      for (const f of files) if (!targets.has(f)) counts.set(f, (counts.get(f) ?? 0) + 1)
+    }
+    if (withTarget === 0) return []
+    return [...counts]
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, limit)
+      .map(([relPath, n]) => ({ relPath, commits: n, ratio: Math.round((n / withTarget) * 100) / 100 }))
+  }
+
   computeBlastRadius(targetSymbolOrPath: string): BlastRadiusReport {
     const t0 = performance.now()
     this.sync(false)
@@ -1626,6 +1670,7 @@ export class RepositoryShard {
       })),
       transitiveFiles: transitiveFiles.sort(),
       affectedTests,
+      coChanged: this.coChanged([...new Set(matchingSymFiles.map((m) => m.rel_path))].slice(0, 3)),
       crossRepoImpacts: [],
       riskLevel,
       elapsedMs: Math.round((performance.now() - t0) * 100) / 100,

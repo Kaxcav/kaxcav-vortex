@@ -71,7 +71,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'blast_radius',
     readOnly: true,
-    description: 'Compute direct callers, transitive impact files, affected tests, and cross-repo impacts.',
+    description: 'Compute direct callers, transitive impact files, affected tests, files that historically change together with the target (git co-change), and cross-repo impacts.',
     inputSchema: { type: 'object', properties: { repo: str, target: str }, required: ['repo', 'target'] },
   },
   {

@@ -287,6 +287,8 @@ export interface BlastRadiusReport {
   directCallers: Array<{ repo: string; relPath: string; symbolName: string; kind: string; line: number }>
   transitiveFiles: string[]
   affectedTests: string[]
+  /** Files that changed together with the target in recent git history (absent outside git). */
+  coChanged?: Array<{ relPath: string; commits: number; ratio: number }>
   crossRepoImpacts: FederationLink[]
   riskLevel: 'low' | 'medium' | 'high' | 'critical'
   elapsedMs: number

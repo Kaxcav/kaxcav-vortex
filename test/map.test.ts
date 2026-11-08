@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -62,6 +63,38 @@ describe('repo_map', () => {
       assert.equal(map.files[0].path, 'src/a.ts')
       assert.match(map.markdown, /src\/a\.ts {2}\(foco\)/)
       assert.equal(engine.repoMap(repo, { path: 'src/leaf.ts' }).files.map((f) => f.path).join(), 'src/leaf.ts')
+    })
+  })
+
+  it('blast_radius: git co-change (>= 2 shared commits; bulk commits ignored; absent outside git)', () => {
+    withRepo({ 'src/a.ts': 'export const a = 1\n', 'src/b.ts': 'export const b = 1\n', 'src/c.ts': 'export const c = 1\n' }, (repo, engine) => {
+      assert.equal(engine.blastRadius(repo, 'src/a.ts').coChanged, undefined, 'not a git repo yet')
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.local', ...args], { cwd: repo, encoding: 'utf8' })
+        assert.equal(r.status, 0, r.stderr)
+      }
+      git('init', '-q')
+      git('add', '-A')
+      git('commit', '-qm', 'base')
+      for (let i = 0; i < 2; i++) {
+        fs.appendFileSync(path.join(repo, 'src', 'a.ts'), `// ${i}\n`)
+        fs.appendFileSync(path.join(repo, 'src', 'b.ts'), `// ${i}\n`)
+        git('commit', '-qam', `ab ${i}`)
+      }
+      fs.appendFileSync(path.join(repo, 'src', 'a.ts'), '// solo\n')
+      fs.appendFileSync(path.join(repo, 'src', 'c.ts'), '// solo\n')
+      git('commit', '-qam', 'ac once')
+      for (let i = 0; i < 45; i++) fs.writeFileSync(path.join(repo, `bulk${i}.txt`), 'x')
+      fs.appendFileSync(path.join(repo, 'src', 'a.ts'), '// bulk\n')
+      fs.appendFileSync(path.join(repo, 'src', 'c.ts'), '// bulk\n')
+      git('add', '-A')
+      git('commit', '-qm', 'bulk')
+      const cc = engine.blastRadius(repo, 'src/a.ts').coChanged
+      // base (a+b+c), ab 0, ab 1, ac once -> b: 3/4, c: 2/4; the 47-file bulk commit does not count
+      assert.deepEqual(cc, [
+        { relPath: 'src/b.ts', commits: 3, ratio: 0.75 },
+        { relPath: 'src/c.ts', commits: 2, ratio: 0.5 },
+      ])
     })
   })
 
