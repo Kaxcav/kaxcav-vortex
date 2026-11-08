@@ -105,6 +105,29 @@ Placeholders available for arguments:
 
 *Note*: Verify the tool names and argument schema against the competitor's `tools/list` output before enabling.
 
+### Built-in competitor adapters (`bench/adapters/competitors.ts`)
+
+Each response format is different, so the main competitors have dedicated adapters that build
+their own index first and call their own tools for each task:
+
+| `--tools` name | Install (not done by the harness) | Index step | Outline / read symbol / references |
+|---|---|---|---|
+| `serena` | `uv tool install -p 3.13 serena-agent` | lazy (language server) | `get_symbols_overview` (names only, no lines) / `find_symbol` / `find_referencing_symbols` |
+| `jcodemunch` | `uv tool install jcodemunch-mcp` | `order(index_folder)` | `get_file_outline` / `get_symbol_source` / `check_references` (via `order`) |
+| `codebase-memory` | official `install.ps1 --skip-config` | `index_repository` | `get_file_outline` / `get_code_snippet` / Cypher `query_graph` (no references tool) |
+| `symforge` | `npm i -g symforge` | `index_folder` | `get_file_context` (full outline) / `get_symbol` / `find_references` |
+| `gitnexus` | `npm i -g gitnexus` | `gitnexus analyze --index-only` | n/a / `context` / n/a (callers without lines) |
+
+Rules: a task a tool does not offer is reported as n/a; any other error counts as an empty
+(wrong) answer; every tool is started with its working directory inside the benchmarked repo,
+so their index folders never land in this checkout. Benchmark a disposable copy of a repo
+(see `kvx-snap` in `repos.json`: a `git archive` of this repo made its own git repo), because
+several tools write index folders into the repo they analyze. Executables are looked up where
+their installers put them on Windows; override with `BENCH_<NAME>_CMD`.
+
+Some of these tools are licensed for non-commercial use only: check each license before
+running or publishing a comparison.
+
 ---
 
 ## Limitations

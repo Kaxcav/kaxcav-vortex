@@ -2,12 +2,25 @@
   {
     "name": "kvx",
     "path": "..",
-    "roots": ["src"]
+    "roots": [
+      "src"
+    ]
+  },
+  {
+    "name": "kvx-snap",
+    "path": ".cache/repos/kvx",
+    "commit": "a7fd2d144c9298787117498268f7592b0b52371b",
+    "roots": [
+      "src"
+    ],
+    "note": "git archive of this repo at that commit, made its own git repo, so competitors can write their index folders into it"
   },
   {
     "name": "zod",
     "path": ".cache/repos/zod",
     "commit": "19c40d2072288b4cafec851e9d056a72a88e5973",
-    "roots": ["packages/zod/src"]
+    "roots": [
+      "packages/zod/src"
+    ]
   }
 ]

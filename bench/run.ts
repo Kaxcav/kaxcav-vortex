@@ -14,6 +14,7 @@ import { deterministicSample, computeMetrics, percentile, type SetMetrics } from
 import { KvxAdapter } from './adapters/kvx.ts';
 import { BaselineAdapter } from './adapters/baseline.ts';
 import { McpStdioClient, type CompetitorConfig } from './adapters/mcp-stdio.ts';
+import { COMPETITORS, Unsupported } from './adapters/competitors.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const benchDir = path.dirname(__filename);
@@ -95,7 +96,11 @@ async function runBenchmarkForRepo(
   // Initialize adapters
   let kvx: KvxAdapter | null = null;
   let baseline: BaselineAdapter | null = null;
-  const mcpClients = new Map<string, McpStdioClient>();
+  // McpStdioClient (generic, kvx-mcp) or a CompetitorAdapter: same outline/readSymbol/references surface.
+  const mcpClients = new Map<string, any>();
+  const competitorIndexMs: Record<string, number> = {};
+  const outlineWithoutLines = new Set<string>();
+  const notAnswered: Record<string, { t1: number; t2: number; t3: number }> = {};
 
   let kvxIndexMs = 0;
   if (enabledTools.includes('kvx')) {
@@ -119,6 +124,23 @@ async function runBenchmarkForRepo(
       }
     }
   }
+
+  // Competitor adapters (bench/adapters/competitors.ts): each builds its own index first.
+  for (const name of enabledTools) {
+    const factory = COMPETITORS[name];
+    if (!factory || mcpClients.has(name)) continue;
+    const adapter = factory(repoAbs);
+    try {
+      await adapter.start(benchDir);
+      competitorIndexMs[name] = adapter.indexMs;
+      if (adapter.outlineWithoutLines) outlineWithoutLines.add(name);
+      mcpClients.set(name, adapter);
+    } catch (err) {
+      console.error(`[bench] ${name} could not start: ${err instanceof Error ? err.message.slice(0, 400) : String(err)}`);
+      adapter.close();
+    }
+  }
+  for (const name of mcpClients.keys()) notAnswered[name] = { t1: 0, t2: 0, t3: 0 };
 
   const sampleSizes = {
     t1: quick ? 6 : 20,
@@ -217,15 +239,21 @@ async function runBenchmarkForRepo(
         const lat = performance.now() - t0;
         let matched = 0;
         for (const g of gtDecls) {
-          if (out.symbols.some((s: any) => s.name === g.name && Math.abs(s.startLine - g.startLine) <= 1)) {
+          // Tools whose outline has no line numbers are matched by name only (see report notes).
+          if (out.symbols.some((s: any) => s.name === g.name && (s.startLine === undefined || Math.abs(s.startLine - g.startLine) <= 1))) {
             matched++;
           }
         }
         t1Metrics[name].recalls.push(matched / gtDecls.length);
         t1Metrics[name].tokens.push(out.tokens);
         t1Metrics[name].latencies.push(lat);
-      } catch {
-        t1Metrics[name].skipped++;
+      } catch (err) {
+        if (err instanceof Unsupported) t1Metrics[name].skipped++;
+        else {
+          // an error is a wrong (empty) answer, not a skipped sample
+          t1Metrics[name].recalls.push(0);
+          notAnswered[name].t1++;
+        }
       }
     }
   }
@@ -318,7 +346,7 @@ async function runBenchmarkForRepo(
     for (const [name, client] of mcpClients) {
       const t0 = performance.now();
       try {
-        const res = await client.readSymbol(sym.file, sym.qualified);
+        const res = await client.readSymbol(sym.file, sym.qualified, sym.startLine);
         const lat = performance.now() - t0;
         t2Metrics[name].total++;
         t2Metrics[name].tokens.push(res.tokens);
@@ -334,8 +362,12 @@ async function runBenchmarkForRepo(
             t2Metrics[name].within1Matches++;
           }
         }
-      } catch {
-        t2Metrics[name].skipped++;
+      } catch (err) {
+        if (err instanceof Unsupported) t2Metrics[name].skipped++;
+        else {
+          t2Metrics[name].total++;
+          notAnswered[name].t2++;
+        }
       }
     }
   }
@@ -453,7 +485,7 @@ async function runBenchmarkForRepo(
     for (const [name, client] of mcpClients) {
       const t0 = performance.now();
       try {
-        const res = await client.references(sym.file, sym.qualified);
+        const res = await client.references(sym.file, sym.qualified, sym.startLine);
         const lat = performance.now() - t0;
         const allSet = new Set(res.references.map((r) => `${r.relPath}:${r.line}`).filter(inUniverse));
         const confSet = new Set(res.confidentReferences.map((r) => `${r.relPath}:${r.line}`).filter(inUniverse));
@@ -462,8 +494,13 @@ async function runBenchmarkForRepo(
         t3Metrics[name].confMetrics.push(computeMetrics(confSet, gtSet));
         t3Metrics[name].tokens.push(res.tokens);
         t3Metrics[name].latencies.push(lat);
-      } catch {
-        t3Metrics[name].skipped++;
+      } catch (err) {
+        if (err instanceof Unsupported) t3Metrics[name].skipped++;
+        else {
+          t3Metrics[name].allMetrics.push(computeMetrics(new Set(), gtSet));
+          t3Metrics[name].confMetrics.push(computeMetrics(new Set(), gtSet));
+          notAnswered[name].t3++;
+        }
       }
     }
   }
@@ -547,6 +584,9 @@ async function runBenchmarkForRepo(
   if (kvx) {
     mdLines.push(`- **Kvx Index Time**: ${kvxIndexMs} ms`);
   }
+  for (const [name, ms] of Object.entries(competitorIndexMs)) {
+    mdLines.push(`- **${name} Index Time**: ${ms} ms`);
+  }
   mdLines.push(`- **Mode**: ${quick ? 'Quick (--quick)' : 'Full'}`);
   mdLines.push('');
 
@@ -555,7 +595,11 @@ async function runBenchmarkForRepo(
   mdLines.push('|---|---|---|---|---|');
   for (const tool of activeT1Tools) {
     const m = t1Metrics[tool];
-    const recStr = (avg(m.recalls) * 100).toFixed(1) + '%';
+    if (m.recalls.length === 0) {
+      mdLines.push(`| ${tool} | n/a (not offered) | | | |`);
+      continue;
+    }
+    const recStr = (avg(m.recalls) * 100).toFixed(1) + '%' + (outlineWithoutLines.has(tool) ? ' (name only)' : '') + (notAnswered[tool]?.t1 ? ` [${notAnswered[tool].t1} errors]` : '');
     const tokStr = Math.round(avg(m.tokens)).toString();
     const p50 = percentile(m.latencies, 50).toFixed(1);
     const p95 = percentile(m.latencies, 95).toFixed(1);
@@ -569,7 +613,11 @@ async function runBenchmarkForRepo(
   const baseAvgTokens = baseline && t2Metrics['baseline']?.tokens.length ? avg(t2Metrics['baseline'].tokens) : 0;
   for (const tool of activeT1Tools) {
     const m = t2Metrics[tool];
-    const exactStr = m.total ? ((m.exactMatches / m.total) * 100).toFixed(1) + '%' : '0.0%';
+    if (m.total === 0 && tool !== 'baseline') {
+      mdLines.push(`| ${tool} | n/a (not offered) | | | | | |`);
+      continue;
+    }
+    const exactStr = m.total ? ((m.exactMatches / m.total) * 100).toFixed(1) + '%' + (notAnswered[tool]?.t2 ? ` [${notAnswered[tool].t2} errors]` : '') : '0.0%';
     const within1Str = m.total ? ((m.within1Matches / m.total) * 100).toFixed(1) + '%' : '0.0%';
     const avgTok = avg(m.tokens);
     const tokStr = Math.round(avgTok).toString();
@@ -597,11 +645,14 @@ async function runBenchmarkForRepo(
       const r = (avg(m.allMetrics.map((x) => x.recall)) * 100).toFixed(1) + '%';
       const f1 = (avg(m.allMetrics.map((x) => x.f1)) * 100).toFixed(1) + '%';
       mdLines.push(`| baseline | git grep | ${p} | ${r} | ${f1} | ${tokStr} | ${p50} | ${p95} |`);
+    } else if (m.allMetrics.length === 0) {
+      mdLines.push(`| ${tool} | n/a (not offered) | | | | | | |`);
     } else {
+      const errs = notAnswered[tool]?.t3 ? ` [${notAnswered[tool].t3} errors]` : '';
       const pAll = (avg(m.allMetrics.map((x) => x.precision)) * 100).toFixed(1) + '%';
       const rAll = (avg(m.allMetrics.map((x) => x.recall)) * 100).toFixed(1) + '%';
       const f1All = (avg(m.allMetrics.map((x) => x.f1)) * 100).toFixed(1) + '%';
-      mdLines.push(`| ${tool} | all | ${pAll} | ${rAll} | ${f1All} | ${tokStr} | ${p50} | ${p95} |`);
+      mdLines.push(`| ${tool} | all${errs} | ${pAll} | ${rAll} | ${f1All} | ${tokStr} | ${p50} | ${p95} |`);
 
       const pConf = (avg(m.confMetrics.map((x) => x.precision)) * 100).toFixed(1) + '%';
       const rConf = (avg(m.confMetrics.map((x) => x.recall)) * 100).toFixed(1) + '%';
@@ -641,6 +692,7 @@ async function runBenchmarkForRepo(
   mdLines.push('- **Ground Truth**: TypeScript 5.9.3 Language Service, with the repository tsconfig.json when present.');
   mdLines.push('- **Fairness**: answers are compared only inside the ground-truth universe (files under the configured roots); for declaration-merged names (a type and a value with the same name in one file) the reference ground truth is the union of both.');
   mdLines.push('- **Token Cost**: Approximated as `Math.ceil(chars / 4)`.');
+  mdLines.push('- **Competitors**: each runs over stdio with its own index and its own tools for the task (bench/adapters/competitors.ts). A task a tool does not offer is n/a; any other error counts as an empty (wrong) answer. "(name only)": the outline has no line numbers, so recall matches names only. Tools that only return the defining file reject nothing outside the universe either: the same universe filter applies to everyone.');
   mdLines.push('- **PRNG Seed**: `20261108` (Mulberry32).');
   mdLines.push(`- **Sample Sizes**: T1=${sampledFilesT1.length}, T2=${sampledSymbolsT2.length}, T3=${sampledSymbolsT3.length}, T4=${sampledFilesT4.length}.`);
   mdLines.push(`- **Repo Commit**: \`${repoCommit}\`.`);
