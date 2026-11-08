@@ -292,14 +292,14 @@ describe('engine', () => {
     }
   })
 
-  it('read-only MCP server exposes only the 10 code tools', () => {
+  it('read-only MCP server exposes only the 11 code tools', () => {
     const home = tmp('kvx-home-')
     const engine = new KaxcavVortexEngine(home)
     try {
       const ro = new VortexMcpServer(engine, () => {}, { readOnly: true })
       const list = ro.handleRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) as { result: { tools: Array<{ name: string }> } }
       const names = list.result.tools.map((t) => t.name)
-      assert.equal(names.length, 10)
+      assert.equal(names.length, 11)
       assert.ok(!names.some((n) => n.startsWith('nexus_')))
       const refused = ro.handleRequest({
         jsonrpc: '2.0',

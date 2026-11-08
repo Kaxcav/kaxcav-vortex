@@ -10,6 +10,7 @@ import type {
 } from '../core/types.ts'
 import { CODE_LANGUAGES } from '../core/types.ts'
 import { CodeStateMachine } from './lexer.ts'
+import { collectTextRefs, dropDeclarationSites } from './refs.ts'
 import { treeSitterExtract, treeSitterHandles, treeSitterStatus } from './treesitter.ts'
 import { TsDeclarationScanner, type TsScanResult } from './ts-scanner.ts'
 
@@ -17,7 +18,7 @@ import { TsDeclarationScanner, type TsScanResult } from './ts-scanner.ts'
  * Bump whenever extraction output changes, so cached extractions (CAS) and stored
  * symbols are rebuilt instead of mixing old and new ranges.
  */
-export const EXTRACTOR_VERSION = 'x8-polyglot'
+export const EXTRACTOR_VERSION = 'x9-refs'
 
 /**
  * Version stamped on shards and CAS keys: the base version plus the tree-sitter layer when it
@@ -88,6 +89,12 @@ export class PolyglotExtractor {
     const res = this.extractByLanguage(file)
     // Slop markers are about code: a Markdown heading like `## TODO` is not a code placeholder.
     res.slopFindings = CODE_LANGUAGES.has(file.lang) ? CodeStateMachine.scanSlop(file.relPath, file.content) : []
+    // Usages for find_references/rename: tree-sitter fills them from the syntax tree; the
+    // other code files use the column-preserving text collector.
+    if (CODE_LANGUAGES.has(file.lang)) {
+      const refs = res.refs ?? collectTextRefs(file.content, file.lang)
+      res.refs = dropDeclarationSites(refs as Parameters<typeof dropDeclarationSites>[0], res.symbols)
+    }
     for (const sym of res.symbols) {
       sym.complexity = this.computeComplexity(sym.sliceText)
       sym.scope ??= 'module'
@@ -131,7 +138,7 @@ export class PolyglotExtractor {
     }
     if (res.symbols.length === 0) {
       const generic = this.extractGeneric(file)
-      return { ...generic, edges: res.edges, routes: res.routes }
+      return { ...generic, edges: res.edges, routes: res.routes, refs: res.refs }
     }
     return res
   }

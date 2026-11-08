@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { MAX_REFS_PER_FILE, type RefKind, type RefTuple } from './refs.ts'
 import type {
   ExtractedEdge,
   ExtractedRoute,
@@ -344,6 +345,59 @@ const SPECS: Partial<Record<SupportedLanguage, LangSpec>> = {
 
 export const TREE_SITTER_LANGS: ReadonlySet<string> = new Set(Object.keys(SPECS))
 
+// ---------------------------------------------------------------- usages (refs)
+
+/** Identifier-like leaves recorded as usages. */
+const REF_TYPES = new Set([
+  'identifier',
+  'type_identifier',
+  'field_identifier',
+  'property_identifier',
+  'namespace_identifier',
+  'constant',
+  'name',
+  'simple_name',
+  'command_name',
+  'variable_name',
+])
+/** Fields holding the receiver of a member access / method call. */
+const RECEIVER_FIELDS = ['object', 'operand', 'receiver', 'value', 'argument', 'expression', 'scope', 'path']
+/** Fields holding the member name of an access. */
+const MEMBER_FIELDS = ['field', 'attribute', 'property', 'method', 'name']
+const ACCESS_TYPES = new Set([
+  'attribute',
+  'selector_expression',
+  'field_access',
+  'member_access_expression',
+  'nullsafe_member_access_expression',
+  'field_expression',
+  'scoped_identifier',
+  'qualified_identifier',
+  'member_expression',
+  'member_call_expression',
+  'nullsafe_member_call_expression',
+  'scoped_call_expression',
+  'method_invocation',
+  'scoped_type_identifier',
+])
+const sameNode = (a: TsNode | null, b: TsNode) => !!a && a.startIndex === b.startIndex && a.endIndex === b.endIndex
+
+function refKindOf(node: TsNode, spec: LangSpec): RefKind {
+  const p = node.parent
+  if (!p) return 'other'
+  const isCall = !!spec.calls?.[p.type]
+  if (!isCall && !ACCESS_TYPES.has(p.type)) return 'other'
+  if (RECEIVER_FIELDS.some((f) => sameNode(p.childForFieldName(f), node))) return 'other'
+  const hasReceiver = RECEIVER_FIELDS.some((f) => p.childForFieldName(f) !== null)
+  if (hasReceiver && MEMBER_FIELDS.some((f) => sameNode(p.childForFieldName(f), node))) {
+    if (isCall) return 'member_call'
+    const gp = p.parent
+    if (gp && spec.calls?.[gp.type] && (sameNode(gp.childForFieldName('function'), p) || sameNode(gp.childForFieldName('name'), p))) return 'member_call'
+    return 'member'
+  }
+  return isCall ? 'call' : 'other'
+}
+
 // ---------------------------------------------------------------- runtime state
 
 interface RuntimeState {
@@ -524,6 +578,17 @@ export function treeSitterExtract(file: ScannedFile): ExtractionResult | null {
     const routes: ExtractedRoute[] = []
     const seenQualified = new Map<string, number>()
     const callSeen = new Set<string>()
+    const refs: RefTuple[] = []
+    const pushRef = (n: TsNode, kind: RefKind) => {
+      if (refs.length >= MAX_REFS_PER_FILE) return
+      const name = src.slice(n.startIndex, n.endIndex)
+      if (name.length < 2 || name.length > 80) return
+      refs.push([name.replace(/^\$/, ''), n.startPosition.row + 1, n.startPosition.column + 1, kind])
+    }
+    const collectImportRefs = (n: TsNode) => {
+      if (REF_TYPES.has(n.type)) pushRef(n, 'import')
+      for (const c of n.namedChildren) if (c) collectImportRefs(c)
+    }
 
     type Parent = { name: string; ns: boolean } | undefined
     const visit = (node: TsNode, parent: Parent, scope: SymbolScope, owner: string | undefined, rangeNode?: TsNode): void => {
@@ -536,7 +601,11 @@ export function treeSitterExtract(file: ScannedFile): ExtractionResult | null {
         } else {
           for (const n of names) edges.push({ srcSymbolName: '__file__', dstName: n, dstPathHint: imp.module, kind: 'imports', weight: 1.2 })
         }
+        // An import holds no declarations: its identifiers are import usages.
+        collectImportRefs(node)
+        return
       }
+      if (REF_TYPES.has(node.type)) pushRef(node, refKindOf(node, spec))
       // Calls (attributed to the enclosing callable)
       const callFn = spec.calls?.[node.type]
       if (callFn && owner) {
@@ -554,6 +623,8 @@ export function treeSitterExtract(file: ScannedFile): ExtractionResult | null {
       if (wrapField) {
         const inner = node.childForFieldName(wrapField) ?? node.namedChildren.find((c) => c && spec.decls[c.type]) ?? null
         if (inner) {
+          // decorators/attributes are usages too (`@login_required`, `@app.get`)
+          for (const c of node.namedChildren) if (c && !sameNode(c, inner)) visit(c, parent, scope, owner)
           visit(inner, parent, scope, owner, node)
           return
         }
@@ -628,6 +699,7 @@ export function treeSitterExtract(file: ScannedFile): ExtractionResult | null {
       symbols,
       edges,
       routes,
+      refs,
     }
   } catch {
     return null

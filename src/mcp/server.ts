@@ -100,6 +100,17 @@ export const TOOL_DEFS: ToolDef[] = [
     inputSchema: { type: 'object', properties: { repo: str, symbol: str, path: str }, required: ['symbol'] },
   },
   {
+    name: 'find_references',
+    readOnly: true,
+    description:
+      'Every usage of ONE symbol (definition excluded): file, line, column, kind (call | member_call | member | import | jsx | other), enclosing symbol and the line text. Confidence: same_file, imported (the file imports the target), name_only (same name, no import link). Ambiguous names return candidates: use `path#Name`. `include_name_only:false` keeps only linked usages.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, symbol: str, path: str, limit: num, include_name_only: { type: 'boolean' } },
+      required: ['symbol'],
+    },
+  },
+  {
     name: 'call_graph',
     readOnly: true,
     description: 'Return direct callers and callees of a symbol.',
@@ -284,6 +295,14 @@ export class VortexMcpServer {
           path: args.path ? String(args.path) : undefined,
         })
         return this.text(id, res.matches.length > 0 ? res.matches : res)
+      }
+      case 'find_references': {
+        const res = this.engine.findReferences(this.repoArg(args), String(args.symbol ?? args.name ?? ''), {
+          path: args.path ? String(args.path) : undefined,
+          limit: args.limit ? Number(args.limit) : undefined,
+          includeNameOnly: args.include_name_only === undefined ? undefined : flag(args.include_name_only),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
       }
       case 'call_graph':
         return this.text(id, this.engine.callGraph(this.repoArg(args), String(args.symbol ?? args.name ?? '')))

@@ -115,6 +115,30 @@ export interface SymbolSlice {
   hash: string
 }
 
+export type RefConfidence = 'same_file' | 'imported' | 'name_only'
+
+export interface ReferenceHit {
+  relPath: string
+  line: number
+  col: number
+  kind: string
+  confidence: RefConfidence
+  /** Innermost non-local symbol around the usage (qualified suffix), if any. */
+  inSymbol?: string
+  text: string
+}
+
+export interface ReferencesResult {
+  ok: boolean
+  reason?: string
+  candidates?: string[]
+  target?: { qualifiedName: string; relPath: string; startLine: number; kind: string; scope: string }
+  total?: number
+  byConfidence?: Record<RefConfidence, number>
+  references?: ReferenceHit[]
+  truncated?: boolean
+}
+
 export interface TextHit {
   relPath: string
   line: number
@@ -307,6 +331,15 @@ export class RepositoryShard {
       );
       CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
 
+      -- Inverted index of usages: which files use a name. Positions stay in the file's CAS
+      -- payload (refs), read only for the candidate files of a find_references query.
+      CREATE TABLE IF NOT EXISTS ref_names (
+        name TEXT NOT NULL,
+        file_id INTEGER NOT NULL,
+        PRIMARY KEY (name, file_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_ref_names_file ON ref_names(file_id);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
         sym_id UNINDEXED,
         file_id UNINDEXED,
@@ -461,6 +494,8 @@ export class RepositoryShard {
         INSERT INTO raw_edges(src_file_id, src_sym_name, dst_name, dst_path_hint, kind, weight)
         VALUES (?, ?, ?, ?, ?, ?)
       `)
+      const delRefNamesByFile = this.db.prepare('DELETE FROM ref_names WHERE file_id = ?')
+      const insertRefNameStmt = this.db.prepare('INSERT OR IGNORE INTO ref_names(name, file_id) VALUES (?, ?)')
       const insertRouteStmt = this.db.prepare(`
         INSERT INTO routes(file_id, rel_path, symbol_name, direction, method, path_pattern, framework)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -528,6 +563,7 @@ export class RepositoryShard {
         delSymbolsByFile.run(fileId)
         delEdgesByFile.run(fileId)
         delRoutesByFile.run(fileId)
+        delRefNamesByFile.run(fileId)
 
         insertFtsFileStmt.run(
           fileId,
@@ -593,6 +629,12 @@ export class RepositoryShard {
           )
         }
 
+        if (extraction.refs?.length) {
+          const names = new Set<string>()
+          for (const r of extraction.refs) names.add(r[0])
+          for (const nm of names) insertRefNameStmt.run(nm, fileId)
+        }
+
         updatedFiles++
       }
 
@@ -604,6 +646,7 @@ export class RepositoryShard {
           delSymbolsByFile.run(prev.file_id)
           delEdgesByFile.run(prev.file_id)
           delRoutesByFile.run(prev.file_id)
+          delRefNamesByFile.run(prev.file_id)
           this.db.prepare('DELETE FROM files WHERE file_id = ?').run(prev.file_id)
           removedFiles++
         }
@@ -1266,6 +1309,114 @@ export class RepositoryShard {
     }
 
     return [...tests].sort()
+  }
+
+  /**
+   * Usages of one symbol across the repository. Confidence: `same_file`; `imported` when the
+   * using file imports the target's file (resolved import edge or a named import); `name_only`
+   * otherwise. Files that declare their own symbol with that name are skipped (shadowing).
+   * Member symbols (`Class.method`) only count member accesses outside their own file.
+   */
+  findReferences(symbolQuery: string, opts: { path?: string; limit?: number; includeNameOnly?: boolean } = {}): ReferencesResult {
+    this.sync(false)
+    const matches = this.readSymbol(symbolQuery, { path: opts.path })
+    if (matches.length === 0) return { ok: false, reason: `nenhum símbolo '${symbolQuery}' no índice de ${this.repositoryPath}` }
+    const bareQuery = symbolQuery.trim().replace(/^.*#/, '')
+    const exact = matches.filter((m) => m.qualifiedName.slice(m.relPath.length + 1) === bareQuery)
+    const pool = exact.length > 0 ? exact : matches.filter((m) => m.scope !== 'local')
+    if (pool.length !== 1) {
+      return {
+        ok: false,
+        reason: `'${symbolQuery}' é ambíguo (${pool.length} candidatos): use caminho#Nome`,
+        candidates: (pool.length ? pool : matches).map((m) => m.qualifiedName),
+      }
+    }
+    const target = pool[0]
+    const name = target.name
+    const isMember = target.scope === 'member'
+    const targetFile = this.db.prepare('SELECT file_id FROM files WHERE rel_path = ?').get(target.relPath) as { file_id: number } | undefined
+    const targetFileId = targetFile?.file_id ?? -1
+
+    const files = this.db
+      .prepare(
+        `SELECT f.file_id AS fileId, f.rel_path AS relPath, f.content_hash AS contentHash
+         FROM ref_names r JOIN files f ON f.file_id = r.file_id WHERE r.name = ?`,
+      )
+      .all(name) as Array<{ fileId: number; relPath: string; contentHash: string }>
+    const importsTarget = new Set<number>(
+      (
+        this.db
+          .prepare(
+            `SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2
+             UNION SELECT src_file_id AS id FROM raw_edges WHERE kind = 'imports' AND dst_name = ?`,
+          )
+          .all(targetFileId, name) as Array<{ id: number }>
+      ).map((r) => r.id),
+    )
+    const declaresSameName = new Set<number>(
+      (
+        this.db.prepare("SELECT DISTINCT file_id AS id FROM symbols WHERE name = ? AND scope != 'local'").all(name) as Array<{ id: number }>
+      ).map((r) => r.id),
+    )
+    const getCas = this.db.prepare('SELECT payload_json FROM cas_extractions WHERE content_hash = ?')
+    const symbolsOf = this.db.prepare(
+      "SELECT qualified_name AS q, rel_path AS p, start_line AS s, end_line AS e FROM symbols WHERE file_id = ? AND scope != 'local'",
+    )
+
+    const rank: Record<RefConfidence, number> = { same_file: 0, imported: 1, name_only: 2 }
+    const hits: ReferenceHit[] = []
+    const byConfidence: Record<RefConfidence, number> = { same_file: 0, imported: 0, name_only: 0 }
+    for (const f of files) {
+      const sameFile = f.fileId === targetFileId
+      if (!sameFile && declaresSameName.has(f.fileId) && !isMember) continue
+      const confidence: RefConfidence = sameFile ? 'same_file' : importsTarget.has(f.fileId) ? 'imported' : 'name_only'
+      if (confidence === 'name_only' && opts.includeNameOnly === false) continue
+      const row = getCas.get(this.casKey(f.contentHash, f.relPath)) as { payload_json: string } | undefined
+      if (!row) continue
+      const refs = (JSON.parse(row.payload_json) as ExtractionResult).refs ?? []
+      for (const r of refs) {
+        if (r[0] !== name) continue
+        const kind = r[3]
+        if (isMember && !sameFile && kind !== 'member' && kind !== 'member_call') continue
+        hits.push({ relPath: f.relPath, line: r[1], col: r[2], kind, confidence, text: '' })
+        byConfidence[confidence]++
+      }
+    }
+    hits.sort((a, b) => rank[a.confidence] - rank[b.confidence] || a.relPath.localeCompare(b.relPath) || a.line - b.line || a.col - b.col)
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000))
+    const shown = hits.slice(0, limit)
+    // Line text and enclosing symbol, only for what is returned.
+    const contentCache = new Map<string, string[]>()
+    const symCache = new Map<string, Array<{ q: string; p: string; s: number; e: number }>>()
+    for (const h of shown) {
+      let lines = contentCache.get(h.relPath)
+      if (!lines) {
+        try {
+          lines = readFileSync(join(this.repositoryPath, ...h.relPath.split('/')), 'utf8').split(/\r?\n/)
+        } catch {
+          lines = []
+        }
+        contentCache.set(h.relPath, lines)
+      }
+      h.text = (lines[h.line - 1] ?? '').trim().slice(0, 200)
+      let syms = symCache.get(h.relPath)
+      if (!syms) {
+        const fid = files.find((f) => f.relPath === h.relPath)?.fileId ?? -1
+        syms = symbolsOf.all(fid) as Array<{ q: string; p: string; s: number; e: number }>
+        symCache.set(h.relPath, syms)
+      }
+      let best: { q: string; p: string; s: number; e: number } | undefined
+      for (const sy of syms) if (sy.s <= h.line && sy.e >= h.line && (!best || sy.e - sy.s < best.e - best.s)) best = sy
+      if (best) h.inSymbol = best.q.slice(best.p.length + 1)
+    }
+    return {
+      ok: true,
+      target: { qualifiedName: target.qualifiedName, relPath: target.relPath, startLine: target.startLine, kind: target.kind, scope: target.scope },
+      total: hits.length,
+      byConfidence,
+      references: shown,
+      truncated: hits.length > shown.length,
+    }
   }
 
   computeBlastRadius(targetSymbolOrPath: string): BlastRadiusReport {

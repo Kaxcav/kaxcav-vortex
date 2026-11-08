@@ -24,7 +24,7 @@ import { MultiRepoFederator } from './federation/federator.ts'
 import { DriveNexusVault } from './nexus/vault.ts'
 import { SubmodularPacker } from './packer/packer.ts'
 import { syntaxErrorCount, treeSitterStatus } from './parser/treesitter.ts'
-import { RepositoryShard, type OutlineScope, type SymbolSlice, type TextHit } from './storage/shard.ts'
+import { RepositoryShard, type OutlineScope, type ReferencesResult, type SymbolSlice, type TextHit } from './storage/shard.ts'
 
 /**
  * Canonical form of a repository path on this machine (K3): absolute, no trailing
@@ -589,6 +589,13 @@ export class KaxcavVortexEngine {
       (similar.length ? `; parecidos: ${similar.slice(0, 5).join(', ')}` : '') +
       (textHits.length ? '; ocorrências abaixo via busca textual' : '')
     return { matches: [], via: textHits.length ? 'busca_textual' : 'nenhum', reason, similar, textHits }
+  }
+
+  /** Usages of a symbol with confidence (same_file | imported | name_only); see RepositoryShard.findReferences. */
+  findReferences(repositoryPath: string, rawQuery: string, rawOpts: { path?: string; limit?: number; includeNameOnly?: boolean } = {}): ReferencesResult {
+    const { query, opts } = this.splitSymbolQuery(rawQuery, { path: rawOpts.path })
+    const { shard } = this.shardForFile(repositoryPath, opts.path ?? '')
+    return shard.findReferences(query, { ...rawOpts, path: opts.path })
   }
 
   searchDetailed(repositoryPath: string, query: string, opts: SearchOptions = {}) {

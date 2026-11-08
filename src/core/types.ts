@@ -169,6 +169,8 @@ export interface ExtractionResult {
   edges: ExtractedEdge[]
   routes: ExtractedRoute[]
   slopFindings?: SlopFinding[]
+  /** Identifier usages: [name, line, col, kind] (1-based), declaration sites excluded. */
+  refs?: Array<[string, number, number, string]>
 }
 
 export interface StoredFileRow {
