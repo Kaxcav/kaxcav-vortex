@@ -111,6 +111,8 @@ export interface SymbolSlice {
   docSummary: string
   tokens: number
   sliceText: string
+  /** Body hash of the slice: pass it back as `expected_hash` to edit_symbol. */
+  hash: string
 }
 
 export interface TextHit {
@@ -139,7 +141,7 @@ export class RepositoryShard {
   constructor(repositoryPath: string, storageRoot: string) {
     this.repositoryPath = resolve(repositoryPath)
     mkdirSync(storageRoot, { recursive: true })
-    const slug = this.computeRepoSlug(this.repositoryPath)
+    const slug = RepositoryShard.computeRepoSlug(this.repositoryPath)
     // Processes with and without the tree-sitter layer extract differently: separate files,
     // so they never take turns re-extracting the same shard.
     const mode = treeSitterStatus().ready ? '-tsw' : ''
@@ -179,7 +181,12 @@ export class RepositoryShard {
     return { ok: true, relPath: relative(this.repositoryPath, resolve(trimmed)).split(sep).join('/') }
   }
 
-  private computeRepoSlug(repoPath: string): string {
+  /** File name of this repository's shard for a given schema version and mode. */
+  static shardFileName(repoPath: string, schemaVersion: number = SHARD_SCHEMA_VERSION, treeSitter = false): string {
+    return `shard-${RepositoryShard.computeRepoSlug(resolve(repoPath))}-v${schemaVersion}${treeSitter ? '-tsw' : ''}.sqlite`
+  }
+
+  private static computeRepoSlug(repoPath: string): string {
     const cleanName = repoPath
       .replace(/^[A-Za-z]:[\\/]/, '')
       .replace(/[^A-Za-z0-9_-]+/g, '-')
@@ -664,6 +671,43 @@ export class RepositoryShard {
     return true
   }
 
+  /** Sync now, ignoring the throttle (before verifying locks or editing). */
+  syncNow(): void {
+    this.lastSyncEpochMs = 0
+    this.sync(false)
+  }
+
+  /** Re-extracts one file even if a rewrite kept its mtime and size (edit_symbol). */
+  reindexFile(relPath: string): void {
+    this.db.prepare('UPDATE files SET mtime_ms = -1 WHERE rel_path = ?').run(relPath)
+    this.refreshFile(relPath)
+  }
+
+  /** Non-local symbols of a file that start at `line`, widest first. */
+  symbolsStartingAt(relPath: string, line: number): Array<{ qualifiedName: string; startLine: number; endLine: number; hash: string }> {
+    return this.db
+      .prepare(
+        `SELECT qualified_name AS qualifiedName, start_line AS startLine, end_line AS endLine, body_hash AS hash
+         FROM symbols WHERE rel_path = ? AND start_line = ? AND scope != 'local'
+         ORDER BY (end_line - start_line) DESC`,
+      )
+      .all(relPath, line) as Array<{ qualifiedName: string; startLine: number; endLine: number; hash: string }>
+  }
+
+  /** Current signature/body hash of a symbol by qualified name (with or without path) or name. */
+  findSymbolBaseline(query: string): { signature: string; bodyHash: string; relPath: string; qualifiedName: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT signature, body_hash AS bodyHash, rel_path AS relPath, qualified_name AS qualifiedName
+         FROM symbols WHERE qualified_name = ? OR qualified_name LIKE '%#' || ? ESCAPE '\\' OR name = ?
+         ORDER BY CASE WHEN qualified_name = ? THEN 0 WHEN name = ? THEN 2 ELSE 1 END LIMIT 1`,
+      )
+      .get(query, likeEscape(query), query, query, query) as
+      | { signature: string; bodyHash: string; relPath: string; qualifiedName: string }
+      | undefined
+  }
+
+  /** @deprecated locks live in the engine (telemetry.sqlite); kept for embedders of the old API. */
   lockSymbols(
     locks: Array<{ qualifiedName: string; relPath: string; mode: 'allow_body_only' | 'frozen' }>,
   ): number {
@@ -1448,7 +1492,7 @@ export class RepositoryShard {
             rel_path AS relPath, name, qualified_name AS qualifiedName,
             kind, scope, start_line AS startLine, end_line AS endLine,
             signature, doc_summary AS docSummary,
-            token_estimate AS tokens, slice_text AS sliceText,
+            token_estimate AS tokens, slice_text AS sliceText, body_hash AS hash,
             CASE
               WHEN lower(qualified_name) LIKE '%#' || ? ESCAPE '\\' THEN 0
               WHEN lower(name) = ? THEN 1

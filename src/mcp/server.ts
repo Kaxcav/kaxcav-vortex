@@ -3,6 +3,10 @@ import { resolve } from 'node:path'
 import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../engine.ts'
 import { KvxIgnoreError } from '../core/kvxignore.ts'
 import type { OutlineScope } from '../storage/shard.ts'
+import type { SymbolEditOp } from '../edit/symbol-editor.ts'
+
+/** Booleans from MCP clients may arrive as strings: only true/"true"/1 count. */
+const flag = (v: unknown): boolean => v === true || v === 'true' || v === 1 || v === '1'
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -107,6 +111,25 @@ export const TOOL_DEFS: ToolDef[] = [
     description:
       'Recently modified files, breaking contract drift of EXPORTED symbols (no locals, no tests) changed in the window, affected callers and tests.',
     inputSchema: { type: 'object', properties: { repo: str, window_minutes: num } },
+  },
+  {
+    name: 'edit_symbol',
+    description:
+      "Edits ONE symbol by whole lines: op replace | insert_before | insert_after | delete. Use `path#Class.method` when the name is ambiguous (the refusal lists the candidates). Pass `expected_hash` (the `hash` from read_symbol) to refuse if the symbol changed since you read it. Refuses .kvxignore'd files, edits that would break symbol locks (kvx or Fábrica) and, with tree-sitter installed, edits that add syntax errors. Writes atomically, keeps BOM/line endings and reindexes the file; `dry_run` previews without writing. Not available on the read-only server.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: str,
+        symbol: str,
+        path: str,
+        op: { type: 'string', enum: ['replace', 'insert_before', 'insert_after', 'delete'] },
+        text: { type: 'string', description: 'Whole lines (with their indentation). Not used by delete.' },
+        expected_hash: str,
+        dry_run: { type: 'boolean' },
+        allow_syntax_errors: { type: 'boolean' },
+      },
+      required: ['symbol', 'op'],
+    },
   },
   {
     name: 'nexus_ingest_vault',
@@ -266,6 +289,18 @@ export class VortexMcpServer {
         return this.text(id, this.engine.callGraph(this.repoArg(args), String(args.symbol ?? args.name ?? '')))
       case 'diff_impact':
         return this.text(id, this.engine.diffImpact(this.repoArg(args), Number(args.window_minutes ?? 60)))
+      case 'edit_symbol': {
+        const res = this.engine.editSymbol(this.repoArg(args), {
+          symbol: String(args.symbol ?? args.name ?? ''),
+          path: args.path ? String(args.path) : undefined,
+          op: String(args.op ?? '') as SymbolEditOp,
+          text: typeof args.text === 'string' ? args.text : undefined,
+          expectedHash: args.expected_hash ? String(args.expected_hash) : undefined,
+          dryRun: flag(args.dry_run),
+          allowSyntaxErrors: flag(args.allow_syntax_errors),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
+      }
       case 'nexus_ingest_vault': {
         const sourceDir = resolve(String(args.source_dir ?? process.cwd()))
         this.engine.assertPathAllowed(sourceDir)

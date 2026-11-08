@@ -39,6 +39,10 @@ interface TsNode {
   endPosition: TsPoint
   parent: TsNode | null
   namedChildren: Array<TsNode | null>
+  children: Array<TsNode | null>
+  hasError: boolean
+  isError: boolean
+  isMissing: boolean
   childForFieldName(name: string): TsNode | null
 }
 interface TsTree {
@@ -346,10 +350,18 @@ interface RuntimeState {
   ready: boolean
   reason?: string
   parsers: Map<string, TsParser>
+  /** TS/TSX/JS grammars: syntax validation of edits only (extraction stays on the own scanner). */
+  validators: Map<string, TsParser>
   version?: string
 }
 
-const state: RuntimeState = { ready: false, reason: 'não inicializado', parsers: new Map() }
+const VALIDATION_GRAMMARS: Record<string, string> = {
+  typescript: 'tree-sitter-typescript.wasm',
+  tsx: 'tree-sitter-tsx.wasm',
+  javascript: 'tree-sitter-javascript.wasm',
+}
+
+const state: RuntimeState = { ready: false, reason: 'não inicializado', parsers: new Map(), validators: new Map() }
 
 /** Loads the WASM runtime and every grammar once. Never throws: reports why it is off. */
 export async function initTreeSitter(): Promise<{ ready: boolean; languages: string[]; reason?: string; ms: number }> {
@@ -381,6 +393,13 @@ export async function initTreeSitter(): Promise<{ ready: boolean; languages: str
       parser.setLanguage(language)
       state.parsers.set(lang, parser)
     }
+    for (const [key, wasm] of Object.entries(VALIDATION_GRAMMARS)) {
+      const wasmPath = join(wasmDir, wasm)
+      if (!existsSync(wasmPath)) continue
+      const parser = new mod.Parser()
+      parser.setLanguage(await mod.Language.load(wasmPath))
+      state.validators.set(key, parser)
+    }
     state.ready = state.parsers.size > 0
     state.reason = state.ready ? undefined : 'nenhuma gramática .wasm encontrada'
   } catch (err) {
@@ -396,6 +415,46 @@ export function treeSitterStatus(): { ready: boolean; languages: string[]; reaso
 
 export function treeSitterHandles(lang: string): boolean {
   return state.ready && state.parsers.has(lang)
+}
+
+/**
+ * Number of syntax errors (ERROR/MISSING nodes) in `content`, or null when no grammar covers
+ * the file. Used to refuse edits that break a file that parsed before.
+ */
+export function syntaxErrorCount(lang: string, relPath: string, content: string): number | null {
+  if (!state.ready) return null
+  const lower = relPath.toLowerCase()
+  const parser =
+    lang === 'typescript'
+      ? state.validators.get(lower.endsWith('.tsx') ? 'tsx' : 'typescript')
+      : lang === 'javascript'
+        ? state.validators.get('javascript')
+        : state.parsers.get(lang)
+  if (!parser) return null
+  let tree: TsTree | null = null
+  try {
+    tree = parser.parse(content)
+    if (!tree) return null
+    let errors = 0
+    const walk = (n: TsNode) => {
+      if (n.isError || n.isMissing) {
+        errors++
+        return
+      }
+      if (!n.hasError) return
+      for (const c of n.children) if (c) walk(c)
+    }
+    walk(tree.rootNode)
+    return errors
+  } catch {
+    return null
+  } finally {
+    try {
+      tree?.delete()
+    } catch {
+      // released with the parser
+    }
+  }
 }
 
 // ---------------------------------------------------------------- extraction

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -17,10 +17,13 @@ import type {
   SlopFinding,
 } from './core/types.ts'
 import { checkKvxIgnore, describeKvxIgnoreBlock, KvxIgnoreError, normalizeFsPath } from './core/kvxignore.ts'
+import { AdmissionFirewall } from './core/firewall.ts'
+import { applyLineEdit, lockViolations, sliceLines, SYMBOL_EDIT_OPS, type SymbolEditOp, type SymbolLock } from './edit/symbol-editor.ts'
+import { PolyglotExtractor } from './parser/extractor.ts'
 import { MultiRepoFederator } from './federation/federator.ts'
 import { DriveNexusVault } from './nexus/vault.ts'
 import { SubmodularPacker } from './packer/packer.ts'
-import { treeSitterStatus } from './parser/treesitter.ts'
+import { syntaxErrorCount, treeSitterStatus } from './parser/treesitter.ts'
 import { RepositoryShard, type OutlineScope, type SymbolSlice, type TextHit } from './storage/shard.ts'
 
 /**
@@ -40,6 +43,35 @@ export function repoKey(p: string): string {
 }
 
 const ABSOLUTE_PATH_RE = /^(?:[A-Za-z]:[\\/]|\/)/
+
+export interface SymbolEditRequest {
+  symbol: string
+  path?: string
+  op: SymbolEditOp
+  /** Whole lines that replace the symbol / are inserted next to it. Not used by `delete`. */
+  text?: string
+  /** `hash` returned by read_symbol: refuses when the symbol changed since it was read. */
+  expectedHash?: string
+  dryRun?: boolean
+  allowSyntaxErrors?: boolean
+}
+
+export interface SymbolEditOutcome {
+  ok: boolean
+  reason?: string
+  candidates?: string[]
+  violations?: Array<{ qualifiedName: string; mode: string; violation: string; source: string }>
+  dryRun?: boolean
+  file?: string
+  op?: SymbolEditOp
+  symbol?: string
+  before?: { startLine: number; endLine: number; hash: string }
+  after?: { startLine: number; endLine: number; qualifiedName?: string; hash?: string }
+  linesRemoved?: number
+  linesAdded?: number
+  syntaxErrors?: { before: number | null; after: number | null }
+  preview?: string
+}
 
 export interface ReadSymbolOutcome {
   matches: SymbolSlice[]
@@ -97,12 +129,25 @@ export class KaxcavVortexEngine {
         repo_path TEXT PRIMARY KEY,
         added_at TEXT NOT NULL
       );
+
+      -- Symbol locks live here, not in the shard: shard files change with the extractor
+      -- version and mode (tree-sitter or not), locks must survive both.
+      CREATE TABLE IF NOT EXISTS symbol_locks (
+        repo_key TEXT NOT NULL,
+        qualified_name TEXT NOT NULL,
+        rel_path TEXT NOT NULL,
+        lock_mode TEXT NOT NULL,
+        baseline_signature TEXT NOT NULL,
+        baseline_body_hash TEXT NOT NULL,
+        locked_at TEXT NOT NULL,
+        PRIMARY KEY (repo_key, qualified_name)
+      );
     `)
   }
 
   /** Refuses (K7) any path blocked by .kvxignore, naming the rule that blocked it. */
-  assertPathAllowed(absPath: string): void {
-    const verdict = checkKvxIgnore(absPath)
+  assertPathAllowed(absPath: string, opts: { fresh?: boolean } = {}): void {
+    const verdict = checkKvxIgnore(absPath, undefined, opts)
     if (verdict.ignored) throw new KvxIgnoreError(describeKvxIgnoreBlock(absPath, verdict), verdict)
   }
 
@@ -289,14 +334,192 @@ export class KaxcavVortexEngine {
     locks: Array<{ qualifiedName: string; relPath: string; mode: 'allow_body_only' | 'frozen' }>,
   ): number {
     const shard = this.getOrOpenShard(repositoryPath)
-    return shard.lockSymbols(locks)
+    shard.syncNow()
+    const key = repoKey(shard.repositoryPath)
+    const now = new Date().toISOString()
+    const stmt = this.telemetryDb.prepare(
+      `INSERT OR REPLACE INTO symbol_locks (repo_key, qualified_name, rel_path, lock_mode, baseline_signature, baseline_body_hash, locked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    let locked = 0
+    for (const l of locks) {
+      const base = shard.findSymbolBaseline(l.qualifiedName)
+      if (!base) continue
+      stmt.run(key, l.qualifiedName, l.relPath || base.relPath, l.mode, base.signature, base.bodyHash, now)
+      locked++
+    }
+    return locked
+  }
+
+  unlockSymbols(repositoryPath: string, qualifiedNames?: string[]): number {
+    const key = repoKey(repositoryPath)
+    if (!qualifiedNames?.length) {
+      return Number(this.telemetryDb.prepare('DELETE FROM symbol_locks WHERE repo_key = ?').run(key).changes)
+    }
+    const stmt = this.telemetryDb.prepare('DELETE FROM symbol_locks WHERE repo_key = ? AND qualified_name = ?')
+    return qualifiedNames.reduce((n, q) => n + Number(stmt.run(key, q).changes), 0)
   }
 
   verifySymbolLocks(
     repositoryPath: string,
   ): Array<{ qualifiedName: string; relPath: string; violation: string }> {
     const shard = this.getOrOpenShard(repositoryPath)
-    return shard.verifySymbolLocks()
+    shard.syncNow()
+    const rows = this.telemetryDb
+      .prepare('SELECT qualified_name, rel_path, lock_mode, baseline_signature, baseline_body_hash FROM symbol_locks WHERE repo_key = ?')
+      .all(repoKey(shard.repositoryPath)) as Array<{
+      qualified_name: string
+      rel_path: string
+      lock_mode: string
+      baseline_signature: string
+      baseline_body_hash: string
+    }>
+    const violations: Array<{ qualifiedName: string; relPath: string; violation: string }> = []
+    for (const lock of rows) {
+      const sym = shard.findSymbolBaseline(lock.qualified_name)
+      if (!sym) {
+        violations.push({ qualifiedName: lock.qualified_name, relPath: lock.rel_path, violation: 'Symbol deleted' })
+      } else if (lock.lock_mode === 'frozen' && sym.bodyHash !== lock.baseline_body_hash) {
+        violations.push({ qualifiedName: lock.qualified_name, relPath: lock.rel_path, violation: 'Frozen symbol body modified' })
+      } else if (lock.lock_mode === 'allow_body_only' && sym.signature !== lock.baseline_signature) {
+        violations.push({
+          qualifiedName: lock.qualified_name,
+          relPath: lock.rel_path,
+          violation: 'Symbol signature modified (only body modifications were allowed)',
+        })
+      }
+    }
+    return violations
+  }
+
+  /**
+   * Locks that edits must respect: this engine's, plus the ones the Fábrica (embedded engine,
+   * shard schema v4) recorded in its shard, read-only, until it runs this engine version.
+   */
+  listSymbolLocks(repositoryPath: string): SymbolLock[] {
+    const repo = this.getOrOpenShard(repositoryPath).repositoryPath
+    const locks: SymbolLock[] = (
+      this.telemetryDb
+        .prepare('SELECT qualified_name, rel_path, lock_mode FROM symbol_locks WHERE repo_key = ?')
+        .all(repoKey(repo)) as Array<{ qualified_name: string; rel_path: string; lock_mode: string }>
+    ).map((r) => ({ qualifiedName: r.qualified_name, relPath: r.rel_path, mode: r.lock_mode as SymbolLock['mode'], source: 'kvx' as const }))
+    const legacy = join(this.storageRoot, 'shards', RepositoryShard.shardFileName(repo, 4))
+    if (existsSync(legacy)) {
+      let db: DatabaseSync | null = null
+      try {
+        db = new DatabaseSync(legacy, { readOnly: true })
+        db.exec('PRAGMA busy_timeout = 5000')
+        const rows = db.prepare('SELECT qualified_name, rel_path, lock_mode FROM symbol_locks').all() as Array<{
+          qualified_name: string
+          rel_path: string
+          lock_mode: string
+        }>
+        for (const r of rows) {
+          if (!locks.some((l) => l.qualifiedName === r.qualified_name)) {
+            locks.push({ qualifiedName: r.qualified_name, relPath: r.rel_path, mode: r.lock_mode as SymbolLock['mode'], source: 'fabrica-v4' })
+          }
+        }
+      } catch {
+        // an old shard without the table, or held by a writer: no legacy locks to add
+      } finally {
+        db?.close()
+      }
+    }
+    return locks
+  }
+
+  /**
+   * Symbol-level edit (full server only): resolves exactly one symbol, refuses stale reads,
+   * .kvxignore'd files, broken locks and new syntax errors, then writes atomically (keeping
+   * BOM, line endings and file mode) and reindexes the file.
+   */
+  editSymbol(repositoryPath: string, req: SymbolEditRequest): SymbolEditOutcome {
+    if (!SYMBOL_EDIT_OPS.includes(req.op)) return { ok: false, reason: `op inválida '${String(req.op)}': use ${SYMBOL_EDIT_OPS.join(' | ')}` }
+    if (req.op !== 'delete' && typeof req.text !== 'string') return { ok: false, reason: `op '${req.op}' exige o campo text` }
+    const { query, opts } = this.splitSymbolQuery(req.symbol, { path: req.path })
+    const { shard } = this.shardForFile(repositoryPath, opts.path ?? '')
+    shard.syncNow()
+    const matches = shard.readSymbol(query, opts)
+    if (matches.length === 0) {
+      return { ok: false, reason: this.readSymbolDetailed(repositoryPath, req.symbol, { path: req.path }).reason ?? `símbolo '${req.symbol}' não encontrado` }
+    }
+    const suffixOf = (m: SymbolSlice) => m.qualifiedName.slice(m.relPath.length + 1)
+    const exact = matches.filter((m) => suffixOf(m) === query)
+    const pool = exact.length > 0 ? exact : matches
+    if (pool.length !== 1) {
+      return {
+        ok: false,
+        reason: `'${req.symbol}' é ambíguo (${pool.length} candidatos): repita com o nome qualificado, ex. caminho#Classe.metodo`,
+        candidates: pool.map((m) => m.qualifiedName),
+      }
+    }
+    const target = pool[0]
+    const abs = join(shard.repositoryPath, ...target.relPath.split('/'))
+    this.assertPathAllowed(abs, { fresh: true })
+    const before = { startLine: target.startLine, endLine: target.endLine, hash: target.hash }
+    if (req.expectedHash && req.expectedHash !== target.hash) {
+      return { ok: false, reason: `o símbolo mudou desde a leitura (hash atual ${target.hash}); leia de novo com read_symbol`, symbol: target.qualifiedName, before }
+    }
+    const oldContent = readFileSync(abs, 'utf8')
+    if (sliceLines(oldContent, target.startLine, target.endLine) !== target.sliceText.replace(/\r\n/g, '\n')) {
+      return { ok: false, reason: 'o índice não corresponde ao arquivo em disco; nada foi gravado (tente de novo)', symbol: target.qualifiedName, before }
+    }
+    const edit = applyLineEdit(oldContent, target.startLine, target.endLine, req.op, req.text)
+    const lang = AdmissionFirewall.detectLanguage(target.relPath) ?? 'other'
+    const syntaxErrors = { before: syntaxErrorCount(lang, target.relPath, oldContent), after: syntaxErrorCount(lang, target.relPath, edit.content) }
+    const base = { file: target.relPath, op: req.op, symbol: target.qualifiedName, before, syntaxErrors }
+    if (!req.allowSyntaxErrors && syntaxErrors.before !== null && syntaxErrors.after !== null && syntaxErrors.after > syntaxErrors.before) {
+      return { ok: false, ...base, reason: `a edição introduz ${syntaxErrors.after - syntaxErrors.before} erro(s) de sintaxe; nada foi gravado` }
+    }
+    const locks = this.listSymbolLocks(shard.repositoryPath)
+    if (locks.length > 0) {
+      const extractor = new PolyglotExtractor()
+      const scanned = (content: string) => ({
+        absPath: abs,
+        relPath: target.relPath,
+        contentHash: '',
+        mtimeMs: 0,
+        byteSize: Buffer.byteLength(content),
+        lang,
+        content,
+        tokenEstimate: Math.ceil(content.length / 4),
+      })
+      const violations = lockViolations(target.relPath, extractor.extract(scanned(oldContent)), extractor.extract(scanned(edit.content)), locks)
+      if (violations.length > 0) {
+        return { ok: false, ...base, violations, reason: `a edição quebraria ${violations.length} trava(s) de símbolo; nada foi gravado` }
+      }
+    }
+    const result = { linesRemoved: edit.linesRemoved, linesAdded: edit.linesAdded }
+    if (req.dryRun) {
+      const lines = edit.content.replace(/^﻿/, '').split(/\r?\n/)
+      const from = Math.max(1, edit.newStart - 2)
+      const to = Math.min(lines.length, Math.max(edit.newEnd, edit.newStart) + 2)
+      const preview = lines
+        .slice(from - 1, to)
+        .map((l, i) => `${String(from + i).padStart(5)}  ${l}`)
+        .join('\n')
+      return { ok: true, dryRun: true, ...base, ...result, after: { startLine: edit.newStart, endLine: edit.newEnd }, preview }
+    }
+    const tmp = `${abs}.kvx-${process.pid}-${Date.now()}.tmp`
+    try {
+      writeFileSync(tmp, edit.content, 'utf8')
+      try {
+        chmodSync(tmp, statSync(abs).mode)
+      } catch {
+        // file modes are advisory on Windows
+      }
+      renameSync(tmp, abs)
+    } catch (err) {
+      rmSync(tmp, { force: true })
+      return { ok: false, ...base, reason: `falha ao gravar: ${err instanceof Error ? err.message : String(err)}` }
+    }
+    shard.reindexFile(target.relPath)
+    const after: NonNullable<SymbolEditOutcome['after']> = { startLine: edit.newStart, endLine: edit.newEnd }
+    if (req.op !== 'delete') {
+      const fresh = shard.symbolsStartingAt(target.relPath, edit.newStart)[0]
+      if (fresh) Object.assign(after, { qualifiedName: fresh.qualifiedName, hash: fresh.hash, endLine: fresh.endLine })
+    }
+    return { ok: true, ...base, ...result, after }
   }
 
   blastRadius(repositoryPath: string, targetSymbolOrPath: string): BlastRadiusReport {
