@@ -257,7 +257,8 @@ export class VortexMcpServer {
   }
 
   private text(id: string | number | null | undefined, payload: unknown, extra: JsonRecord = {}): JsonRecord {
-    const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+    // Compact JSON: indentation cost ~3-4x the tokens of the same answer (bench T1: 3625 -> ~830).
+    const text = typeof payload === 'string' ? payload : JSON.stringify(payload)
     return this.respond(id, { content: [{ type: 'text', text }], ...extra })
   }
 

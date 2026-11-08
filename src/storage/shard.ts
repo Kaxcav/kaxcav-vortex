@@ -64,6 +64,12 @@ export function moduleHintToPath(hint: string): string | null {
   return path.includes('/') ? path : null
 }
 
+/** `new Cls(...).` / `new Cls<T>(...)?.` right before a member access. */
+function newInstanceRe(className: string): RegExp {
+  const escaped = className.replace(/[$]/g, '\\$')
+  return new RegExp(String.raw`\bnew\s+` + escaped + String.raw`\s*(?:<[^>]*>)?\([^;]*\)\s*\??\.\s*$`)
+}
+
 /** Longest suffix of `path` (2+ segments) present in the index; ambiguous (-1) -> undefined. */
 function uniqueSuffix(index: Map<string, number>, path: string): number | undefined {
   const parts = path.split('/').filter(Boolean)
@@ -884,10 +890,24 @@ export class RepositoryShard {
   private rebuildResolvedFileEdges(): void {
     this.db.exec('DELETE FROM resolved_edges')
 
-    const files = this.db.prepare('SELECT file_id, rel_path FROM files').all() as Array<{
+    const files = this.db.prepare('SELECT file_id, rel_path, lang FROM files').all() as Array<{
       file_id: number
       rel_path: string
+      lang: string
     }>
+    const langById = new Map(files.map((f) => [f.file_id, f.lang]))
+    // Workspace packages (monorepos, self-references): `name` of every indexed package.json.
+    const workspacePackages: Array<{ name: string; dir: string }> = []
+    for (const f of files) {
+      if (!/(?:^|\/)package\.json$/.test(f.rel_path)) continue
+      try {
+        const pkg = JSON.parse(readFileSync(join(this.repositoryPath, ...f.rel_path.split('/')), 'utf8')) as { name?: unknown }
+        if (typeof pkg.name === 'string' && pkg.name) workspacePackages.push({ name: pkg.name, dir: posix.dirname(f.rel_path) })
+      } catch {
+        // not JSON / unreadable: not a package
+      }
+    }
+    workspacePackages.sort((a, b) => b.name.length - a.name.length)
     const symbols = this.db.prepare('SELECT file_id, name FROM symbols').all() as Array<{
       file_id: number
       name: string
@@ -980,6 +1000,24 @@ export class RepositoryShard {
             continue
           }
         }
+        const jsLike = langById.get(e.src_file_id) === 'typescript' || langById.get(e.src_file_id) === 'javascript'
+        // `pkg` / `pkg/sub` of a package of this workspace: its dir, its src/, index files.
+        if (jsLike && !e.dst_path_hint.startsWith('.')) {
+          const spec = e.dst_path_hint
+          const pkg = workspacePackages.find((p) => spec === p.name || spec.startsWith(`${p.name}/`))
+          if (pkg) {
+            const sub = spec === pkg.name ? '' : spec.slice(pkg.name.length + 1).replace(/\.[cm]?[jt]sx?$/, '')
+            const base = pkg.dir === '.' ? '' : `${pkg.dir}/`
+            const candidates = sub
+              ? [`${base}src/${sub}`, `${base}${sub}`, `${base}src/${sub}/index`, `${base}${sub}/index`]
+              : [`${base}src/index`, `${base}index`, `${base}src/main`]
+            const hit = candidates.map((c) => fileByRelNoExt.get(c.toLowerCase())).find((id) => id !== undefined)
+            if (hit !== undefined) {
+              addEdge(e.src_file_id, hit, Math.max(1.5, e.weight * 1.5), true)
+              continue
+            }
+          }
+        }
         // Module paths of the other languages: `com.acme.Invoice`, `a.b`, `crate::x::y`,
         // `App\Models\User`, `github.com/org/repo/pkg/util` -> path suffix of a file or package dir.
         const modPath = moduleHintToPath(e.dst_path_hint)
@@ -1006,7 +1044,10 @@ export class RepositoryShard {
         }
         const baseHint = cleanHint.split('/').pop() ?? cleanHint
         const baseTargets = fileByBasename.get(baseHint)
-        if (baseTargets && baseTargets.length === 1) {
+        // A bare npm specifier (`zod`, `react`, `@scope/x`) is a package, not a local file that
+        // happens to share its basename.
+        const barePackage = jsLike && !e.dst_path_hint.startsWith('.') && !/\.[cm]?[jt]sx?$/.test(e.dst_path_hint)
+        if (!barePackage && baseTargets && baseTargets.length === 1) {
           addEdge(e.src_file_id, baseTargets[0], Math.max(1.5, e.weight), true)
           continue
         }
@@ -1367,20 +1408,84 @@ export class RepositoryShard {
 
     const files = this.db
       .prepare(
-        `SELECT f.file_id AS fileId, f.rel_path AS relPath, f.content_hash AS contentHash
+        `SELECT f.file_id AS fileId, f.rel_path AS relPath, f.content_hash AS contentHash, f.lang AS lang
          FROM ref_names r JOIN files f ON f.file_id = r.file_id WHERE r.name = ?`,
       )
-      .all(name) as Array<{ fileId: number; relPath: string; contentHash: string }>
+      .all(name) as Array<{ fileId: number; relPath: string; contentHash: string; lang: string }>
+    // `imported` = a resolved import edge to the target's file (a named import of the same name
+    // from ANOTHER module refers to another declaration: that file is skipped below).
     const importsTarget = new Set<number>(
       (
-        this.db
-          .prepare(
-            `SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2
-             UNION SELECT src_file_id AS id FROM raw_edges WHERE kind = 'imports' AND dst_name = ?`,
-          )
-          .all(targetFileId, name) as Array<{ id: number }>
+        this.db.prepare('SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2').all(targetFileId) as Array<{
+          id: number
+        }>
       ).map((r) => r.id),
     )
+    // Barrels (index.ts / __init__.py / mod.rs) re-export: importing one counts as importing the
+    // target when the barrel itself imports it (two levels: core/index -> v4/index).
+    {
+      const barrelOf = this.db.prepare(
+        `SELECT f.file_id AS id FROM files f JOIN resolved_edges e ON e.src_file_id = f.file_id
+         WHERE e.dst_file_id = ? AND e.weight >= 1.2
+           AND (f.rel_path LIKE '%/index.%' OR f.rel_path LIKE 'index.%' OR f.rel_path LIKE '%__init__.py' OR f.rel_path LIKE '%/mod.rs')`,
+      )
+      const importersOf = this.db.prepare('SELECT src_file_id AS id FROM resolved_edges WHERE dst_file_id = ? AND weight >= 1.2')
+      let frontier = [targetFileId]
+      const seenBarrels = new Set<number>()
+      for (let level = 0; level < 2 && frontier.length > 0; level++) {
+        const next: number[] = []
+        for (const id of frontier) {
+          for (const b of barrelOf.all(id) as Array<{ id: number }>) {
+            if (seenBarrels.has(b.id)) continue
+            seenBarrels.add(b.id)
+            next.push(b.id)
+            for (const imp of importersOf.all(b.id) as Array<{ id: number }>) importsTarget.add(imp.id)
+          }
+        }
+        frontier = next
+      }
+    }
+    const importsNameElsewhere = new Set<number>(
+      (
+        this.db.prepare("SELECT DISTINCT src_file_id AS id FROM raw_edges WHERE kind = 'imports' AND dst_name = ?").all(name) as Array<{ id: number }>
+      )
+        .map((r) => r.id)
+        .filter((id) => !importsTarget.has(id) && id !== targetFileId),
+    )
+    // A member's bare-name usages only count inside its own class body.
+    const suffix = target.qualifiedName.slice(target.relPath.length + 1)
+    const classRange =
+      isMember && suffix.includes('.')
+        ? (this.db
+            .prepare('SELECT start_line AS s, end_line AS e FROM symbols WHERE file_id = ? AND qualified_name = ?')
+            .get(targetFileId, `${target.relPath}#${suffix.replace(/\.[^.]+$/, '')}`) as { s: number; e: number } | undefined)
+        : undefined
+    const JS_LIKE = new Set(['typescript', 'javascript'])
+    // Same class with a static AND an instance member of this name: the receiver tells them
+    // apart (`Cls.x` -> static, `this.x` / `obj.x` -> instance).
+    let staticTwin: { wantStatic: boolean; className: string } | undefined
+    if (isMember && suffix.includes('.')) {
+      const twins = this.db
+        .prepare("SELECT signature FROM symbols WHERE file_id = ? AND name = ? AND scope = 'member' AND qualified_name LIKE ? ESCAPE '\\'")
+        .all(targetFileId, name, `${likeEscape(target.relPath)}#${likeEscape(suffix.replace(/\.[^.]+$/, ''))}.%`) as Array<{ signature: string }>
+      const statics = twins.filter((t) => /^static\b/.test(t.signature)).length
+      if (statics > 0 && statics < twins.length) {
+        staticTwin = { wantStatic: /^static\b/.test(target.signature), className: suffix.replace(/\.[^.]+$/, '').split('.').pop() ?? '' }
+      }
+    }
+    const lineCache = new Map<string, string[]>()
+    const lineOf = (rel: string, line: number): string => {
+      let lines = lineCache.get(rel)
+      if (!lines) {
+        try {
+          lines = readFileSync(join(this.repositoryPath, ...rel.split('/')), 'utf8').split(/\r?\n/)
+        } catch {
+          lines = []
+        }
+        lineCache.set(rel, lines)
+      }
+      return lines[line - 1] ?? ''
+    }
     const declaresSameName = new Set<number>(
       (
         this.db.prepare("SELECT DISTINCT file_id AS id FROM symbols WHERE name = ? AND scope != 'local'").all(name) as Array<{ id: number }>
@@ -1394,18 +1499,62 @@ export class RepositoryShard {
     const rank: Record<RefConfidence, number> = { same_file: 0, imported: 1, name_only: 2 }
     const hits: ReferenceHit[] = []
     const byConfidence: Record<RefConfidence, number> = { same_file: 0, imported: 0, name_only: 0 }
+    const IMPLICIT_THIS = new Set(['java', 'csharp', 'cpp', 'ruby'])
+    const OWN_RECEIVERS = new Set(['this', '$this', 'self', 'super', 'cls'])
+    const className = suffix.includes('.') ? (suffix.replace(/\.[^.]+$/, '').split('.').pop() ?? '') : ''
+    const receiverOf = (rel: string, line: number, col: number) =>
+      /([A-Za-z_$][\w$]*)\s*(?:\?\.|\.|->|::)\s*$/.exec(lineOf(rel, line).slice(0, col - 1))?.[1]
+    // `import * as ns from '...'` aliases of a JS/TS file: `ns.name` reaches a module symbol.
+    const nsAliases = (rel: string): Set<string> => {
+      lineOf(rel, 1)
+      const out = new Set<string>()
+      for (const l of lineCache.get(rel) ?? []) {
+        const m = /\bimport\s+(?:type\s+)?\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(l)
+        if (m) out.add(m[1])
+      }
+      return out
+    }
     for (const f of files) {
       const sameFile = f.fileId === targetFileId
       if (!sameFile && declaresSameName.has(f.fileId) && !isMember) continue
-      const confidence: RefConfidence = sameFile ? 'same_file' : importsTarget.has(f.fileId) ? 'imported' : 'name_only'
-      if (confidence === 'name_only' && opts.includeNameOnly === false) continue
+      if (!sameFile && !isMember && importsNameElsewhere.has(f.fileId)) continue
+      const fileConfidence: RefConfidence = sameFile ? 'same_file' : importsTarget.has(f.fileId) ? 'imported' : 'name_only'
       const row = getCas.get(this.casKey(f.contentHash, f.relPath)) as { payload_json: string } | undefined
       if (!row) continue
       const refs = (JSON.parse(row.payload_json) as ExtractionResult).refs ?? []
+      let aliases: Set<string> | undefined
       for (const r of refs) {
         if (r[0] !== name) continue
         const kind = r[3]
-        if (isMember && !sameFile && kind !== 'member' && kind !== 'member_call') continue
+        const memberKind = kind === 'member' || kind === 'member_call'
+        let confidence = fileConfidence
+        if (isMember) {
+          if (memberKind) {
+            // Without types, `obj.x` is only linked when the receiver is the class itself.
+            const receiver = receiverOf(f.relPath, r[1], r[2])
+            const head = lineOf(f.relPath, r[1]).slice(0, r[2] - 1)
+            // `this.x`, `Cls.x`, or a fresh instance `new Cls(...).x`
+            const own =
+              (receiver !== undefined && (OWN_RECEIVERS.has(receiver) || receiver === className)) ||
+              (className !== '' && newInstanceRe(className).test(head))
+            if (staticTwin && (receiver === staticTwin.className) !== staticTwin.wantStatic) continue
+            if (!own) confidence = 'name_only'
+          } else {
+            // a bare `x` is the member only inside its class, in languages with an implicit `this`
+            const inClass =
+              sameFile && IMPLICIT_THIS.has(f.lang) && classRange !== undefined && r[1] >= classRange.s && r[1] <= classRange.e && kind !== 'import'
+            if (!inClass) continue
+          }
+        } else if (memberKind) {
+          if (sameFile) continue // `obj.add` in the defining file is another object's property
+          if (JS_LIKE.has(f.lang)) {
+            // JS/TS reach module symbols through `ns.add` only with `import * as ns`
+            aliases ??= nsAliases(f.relPath)
+            const receiver = receiverOf(f.relPath, r[1], r[2])
+            if (!receiver || !aliases.has(receiver)) continue
+          }
+        }
+        if (confidence === 'name_only' && opts.includeNameOnly === false) continue
         hits.push({ relPath: f.relPath, line: r[1], col: r[2], kind, confidence, text: '' })
         byConfidence[confidence]++
       }
@@ -1631,7 +1780,9 @@ export class RepositoryShard {
       if (idx !== undefined) startNodes.push(idx)
     }
 
-    const reachable = graph.reverseReachable(startNodes, 5)
+    // Only real (resolved import) edges propagate impact: name-only links (<= 0.75) chained over
+    // 5 levels pulled in the whole component (benchmark T4: precision 37% -> see bench/).
+    const reachable = graph.reverseReachable(startNodes, 5, 1.0)
     const transitiveFiles: string[] = []
     for (const [nodeIdx, depth] of reachable.entries()) {
       if (depth > 0 && indexToFile[nodeIdx]) {

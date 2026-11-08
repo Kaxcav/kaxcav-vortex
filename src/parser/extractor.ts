@@ -18,7 +18,7 @@ import { TsDeclarationScanner, type TsScanResult } from './ts-scanner.ts'
  * Bump whenever extraction output changes, so cached extractions (CAS) and stored
  * symbols are rebuilt instead of mixing old and new ranges.
  */
-export const EXTRACTOR_VERSION = 'x9-refs'
+export const EXTRACTOR_VERSION = 'x11-refs'
 
 /**
  * Version stamped on shards and CAS keys: the base version plus the tree-sitter layer when it

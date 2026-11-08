@@ -123,6 +123,36 @@ describe('find_references', () => {
     )
   })
 
+  it('precision (benchmark findings): keys/params, bare member names, same name from another module, static vs instance', () => {
+    withRepo(
+      {
+        'src/conf.ts':
+          'export interface Opts {\n  limit?: number\n}\nexport function limit(o: { limit: number }, limit2: number): number {\n  return o.limit + limit2\n}\nexport const use = limit({ limit: 1 }, 2)\n',
+        'src/k.ts':
+          'export class K {\n  verdict = 1\n  static parse(s: string) {\n    return s\n  }\n  parse(s: string) {\n    return K.parse(s) + this.verdict\n  }\n}\nexport function other() {\n  const verdict = 2\n  return verdict\n}\n',
+        'src/types.ts': 'export interface Pack {\n  n: number\n}\n',
+        'src/gateway.ts': 'export interface Pack {\n  m: string\n}\n',
+        'src/eng.ts': "import type { Pack } from './types'\nexport const p: Pack = { n: 1 }\n",
+        'src/use-k.ts': "import { K } from './k'\nexport const a = new K().parse('x') + K.parse('y')\n",
+      },
+      (repo, engine) => {
+        const lines = (q: string) => engine.findReferences(repo, q).references!.map((r) => `${r.relPath}:${r.line}:${r.kind}`)
+        // `limit?: number`, `{ limit: 1 }` and `o.limit` are not usages of function `limit`
+        assert.deepEqual(lines('src/conf.ts#limit'), ['src/conf.ts:7:call'])
+        // a local `verdict` in another function is not the field K.verdict
+        assert.deepEqual(lines('K.verdict'), ['src/k.ts:7:member'])
+        // eng.ts imports `Pack` from types.ts, not from gateway.ts
+        assert.deepEqual(lines('src/gateway.ts#Pack'), [])
+        // K.parse (static) vs this/obj.parse (instance)
+        assert.deepEqual(lines('src/k.ts#K.parse'), ['src/k.ts:7:member_call', 'src/use-k.ts:2:member_call'])
+        assert.deepEqual(
+          engine.findReferences(repo, 'src/k.ts#K.parse~2').references!.map((r) => `${r.relPath}:${r.line}:${r.col}`),
+          ['src/use-k.ts:2:26'],
+        )
+      },
+    )
+  })
+
   it('MCP: find_references is on the read-only server too', () => {
     withRepo(FILES, (repo, engine) => {
       const ro = new VortexMcpServer(engine, () => {}, { readOnly: true })

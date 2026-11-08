@@ -150,9 +150,10 @@ export class CsrGraph {
   }
 
   /**
-   * Reverse BFS traversal for Blast Radius and Affected Tests calculation.
+   * Reverse BFS traversal for Blast Radius and Affected Tests calculation. `minWeight` keeps only
+   * edges at least that strong (>= 1.0: resolved imports; name-only links are <= 0.75).
    */
-  reverseReachable(startNodes: number[], maxDepth = 5): Map<number, number> {
+  reverseReachable(startNodes: number[], maxDepth = 5, minWeight = 0): Map<number, number> {
     const visited = new Map<number, number>()
     let frontier: number[] = []
     for (const n of startNodes) {
@@ -169,6 +170,7 @@ export class CsrGraph {
         const rEnd = this.reverseRowPtr[u + 1]
         for (let idx = rStart; idx < rEnd; idx++) {
           const caller = this.reverseColIdx[idx]
+          if (this.reverseWeights[idx] < minWeight) continue
           if (!visited.has(caller)) {
             visited.set(caller, depth)
             nextFrontier.push(caller)

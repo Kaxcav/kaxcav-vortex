@@ -221,6 +221,22 @@ export function collectTextRefs(content: string, lang: string): RefTuple[] {
       const before = line.slice(0, m.index)
       const after = line.slice(m.index + name.length).trimStart()
       const beforeTrim = before.trimEnd()
+      // `key: value`, `key?: Type`, `(param: Type)`, `readonly field: T`: a name being declared
+      // (object key, property signature, parameter), not a usage of a symbol with that name.
+      if (
+        /^\??:(?!:)/.test(after) &&
+        (beforeTrim === '' || /[{,(;]$/.test(beforeTrim) || /\b(?:readonly|public|private|protected|static|declare|abstract|override)$/.test(beforeTrim))
+      ) {
+        continue
+      }
+      // TS overload / interface / abstract method signatures: `name(...): T;` with no body is a
+      // declaration, not a call.
+      if (
+        /^\s*(?:(?:public|private|protected|static|abstract|declare|override|readonly|async|get|set)\s+)*$/.test(before) &&
+        /^[\w$]+\s*\??\s*(?:<[^>]*>)?\s*\(.*\)\s*:\s*[^{=]*;\s*$/.test(line.slice(m.index))
+      ) {
+        continue
+      }
       let kind: RefKind
       if (importLine) kind = 'import'
       else if (/(?:\?\.|\.|->|::)$/.test(beforeTrim)) kind = after.startsWith('(') ? 'member_call' : 'member'
