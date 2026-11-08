@@ -1,18 +1,97 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { AdmissionFirewall } from '../core/firewall.ts'
+import { normalizeFsPath } from '../core/kvxignore.ts'
 import type {
   BlastRadiusReport,
   ExtractionResult,
   SearchHit,
+  SearchOptions,
   ShardHealth,
   StoredFileRow,
   StoredSymbolRow,
 } from '../core/types.ts'
 import { CsrGraph, type CsrEdgeInput } from '../graph/csr.ts'
-import { PolyglotExtractor } from '../parser/extractor.ts'
+import { EXTRACTOR_VERSION, PolyglotExtractor } from '../parser/extractor.ts'
+import type { SlopFinding } from '../core/types.ts'
+
+/**
+ * Bumped when the shard schema changes. The version is part of the shard file name so an
+ * older kvx process still running (e.g. an MCP server not yet restarted) never writes old
+ * rows into a newer shard.
+ */
+export const SHARD_SCHEMA_VERSION = 4
+
+/** Minimum interval between two full repository stat-walks triggered by queries. */
+const SYNC_THROTTLE_MS = 500
+
+/** WAL is truncated after an indexing pass, or whenever it exceeds this fraction of the DB. */
+const WAL_MAX_DB_RATIO = 0.25
+
+/** Escapes `%`, `_` and `\` so user input is literal inside LIKE (use with ESCAPE '\'). */
+export function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, '\\$&')
+}
+
+export type OutlineScope = 'topo' | 'exportado' | 'tudo'
+
+export interface OutlineSymbol {
+  name: string
+  qualifiedName: string
+  kind: string
+  scope: string
+  exported: boolean
+  startLine: number
+  endLine: number
+  signature: string
+  docSummary: string
+}
+
+export type FileOutlineResult =
+  | {
+      found: true
+      relPath: string
+      tokenEstimate: number
+      outlineTokens: number
+      scope: OutlineScope
+      hiddenSymbols: number
+      otherMatches?: string[]
+      reason?: string
+      symbols: OutlineSymbol[]
+    }
+  | {
+      found: false
+      relPath?: string
+      reason: string
+      suggestions: string[]
+    }
+
+export interface SymbolSlice {
+  relPath: string
+  name: string
+  qualifiedName: string
+  kind: string
+  scope: string
+  startLine: number
+  endLine: number
+  signature: string
+  docSummary: string
+  tokens: number
+  sliceText: string
+}
+
+export interface TextHit {
+  relPath: string
+  line: number
+  text: string
+  matchedTerms: number
+}
+
+export type PathResolution =
+  | { ok: true; relPath: string }
+  | { ok: false; reason: string }
 
 export class RepositoryShard {
   readonly repositoryPath: string
@@ -22,16 +101,47 @@ export class RepositoryShard {
   private readonly extractor: PolyglotExtractor
   private cachedGraph: CsrGraph | null = null
   private lastSyncEpochMs = 0
+  private lastSyncAtIso = ''
+  private needsFullReextract = false
 
   constructor(repositoryPath: string, storageRoot: string) {
     this.repositoryPath = resolve(repositoryPath)
     mkdirSync(storageRoot, { recursive: true })
     const slug = this.computeRepoSlug(this.repositoryPath)
-    this.shardPath = join(storageRoot, `shard-${slug}.sqlite`)
+    this.shardPath = join(storageRoot, `shard-${slug}-v${SHARD_SCHEMA_VERSION}.sqlite`)
     this.db = new DatabaseSync(this.shardPath)
     this.firewall = new AdmissionFirewall(this.repositoryPath)
     this.extractor = new PolyglotExtractor()
     this.initializeSchema()
+    const versionRow = this.db
+      .prepare("SELECT value FROM meta WHERE key = 'extractor_version'")
+      .get() as { value: string } | undefined
+    this.needsFullReextract = versionRow?.value !== EXTRACTOR_VERSION
+  }
+
+  /**
+   * Converts a user-supplied file/path argument (absolute in any drive-letter case or
+   * slash style, or repository-relative) into a repository-relative POSIX path.
+   */
+  resolveRepoPath(input: string): PathResolution {
+    // Strip quotes and the Win32 long-path prefix (\\?\C:\...).
+    const trimmed = input.trim().replace(/^["']|["']$/g, '').replace(/^\\\\\?\\/, '')
+    if (!trimmed) return { ok: true, relPath: '' }
+    const looksAbsolute = isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed)
+    if (!looksAbsolute) {
+      const rel = posix.normalize(trimmed.replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/+$/, '')
+      if (rel === '..' || rel.startsWith('../')) {
+        return { ok: false, reason: `caminho fora do repositório indexado (${this.repositoryPath}): ${trimmed}` }
+      }
+      return { ok: true, relPath: rel === '.' ? '' : rel }
+    }
+    const rootNorm = normalizeFsPath(this.repositoryPath)
+    const inNorm = normalizeFsPath(trimmed)
+    if (inNorm === rootNorm) return { ok: true, relPath: '' }
+    if (!inNorm.startsWith(rootNorm + '/')) {
+      return { ok: false, reason: `caminho fora do repositório indexado (${this.repositoryPath}): ${trimmed}` }
+    }
+    return { ok: true, relPath: relative(this.repositoryPath, resolve(trimmed)).split(sep).join('/') }
   }
 
   private computeRepoSlug(repoPath: string): string {
@@ -47,6 +157,7 @@ export class RepositoryShard {
 
   private initializeSchema(): void {
     this.db.exec(`
+      PRAGMA busy_timeout = 15000;
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
       PRAGMA wal_autocheckpoint = 1000;
@@ -54,6 +165,14 @@ export class RepositoryShard {
       PRAGMA temp_store = MEMORY;
       PRAGMA mmap_size = 67108864;
 
+      CREATE TABLE IF NOT EXISTS symbol_locks (
+        qualified_name TEXT PRIMARY KEY,
+        rel_path TEXT NOT NULL,
+        lock_mode TEXT NOT NULL,
+        baseline_signature TEXT NOT NULL,
+        baseline_body_hash TEXT NOT NULL,
+        locked_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -87,7 +206,8 @@ export class RepositoryShard {
         token_estimate INTEGER NOT NULL,
         is_hub INTEGER NOT NULL DEFAULT 0,
         summary TEXT NOT NULL DEFAULT '',
-        headings TEXT NOT NULL DEFAULT ''
+        headings TEXT NOT NULL DEFAULT '',
+        indexed_at INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS symbols (
@@ -105,7 +225,9 @@ export class RepositoryShard {
         token_estimate INTEGER NOT NULL,
         doc_summary TEXT NOT NULL DEFAULT '',
         slice_text TEXT NOT NULL,
-        is_hub INTEGER NOT NULL DEFAULT 0
+        is_hub INTEGER NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT 'module',
+        parent TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
@@ -162,6 +284,41 @@ export class RepositoryShard {
         tokenize = 'porter unicode61'
       );
     `)
+    this.ensureColumn('symbols', 'scope', "TEXT NOT NULL DEFAULT 'module'")
+    this.ensureColumn('symbols', 'parent', 'TEXT')
+    this.ensureColumn('files', 'indexed_at', 'INTEGER NOT NULL DEFAULT 0')
+    this.maybeCheckpointWal(false)
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+    }
+  }
+
+  /**
+   * Keeps the WAL from outgrowing the database (K9): TRUNCATE checkpoint after an
+   * indexing pass, or whenever the WAL exceeds WAL_MAX_DB_RATIO of the DB size.
+   */
+  maybeCheckpointWal(afterIndexing: boolean): { checkpointed: boolean; walBytesBefore: number } {
+    let dbBytes = 0
+    let walBytes = 0
+    try {
+      if (existsSync(this.shardPath)) dbBytes = statSync(this.shardPath).size
+      const walPath = `${this.shardPath}-wal`
+      if (existsSync(walPath)) walBytes = statSync(walPath).size
+    } catch {
+      return { checkpointed: false, walBytesBefore: 0 }
+    }
+    const tooBig = walBytes > Math.max(1_048_576, dbBytes * WAL_MAX_DB_RATIO)
+    if (!(afterIndexing && walBytes > 0) && !tooBig) return { checkpointed: false, walBytesBefore: walBytes }
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      return { checkpointed: true, walBytesBefore: walBytes }
+    } catch {
+      return { checkpointed: false, walBytesBefore: walBytes }
+    }
   }
 
   /**
@@ -175,7 +332,12 @@ export class RepositoryShard {
     elapsedMs: number
   } {
     const now = Date.now()
-    if (!force && this.lastSyncEpochMs > 0 && now - this.lastSyncEpochMs < 2_500) {
+    if (this.needsFullReextract) {
+      force = true
+      // Signatures recorded by an older extractor have another format: comparing them would be noise.
+      this.db.exec('DELETE FROM symbol_history')
+    }
+    if (!force && this.lastSyncEpochMs > 0 && now - this.lastSyncEpochMs < SYNC_THROTTLE_MS) {
       const countRow = this.db.prepare('SELECT COUNT(*) AS c FROM files').get() as { c: number }
       return { totalFiles: countRow.c, updatedFiles: 0, removedFiles: 0, elapsedMs: 0 }
     }
@@ -200,6 +362,9 @@ export class RepositoryShard {
 
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      if (force) {
+        this.db.exec('DELETE FROM cas_extractions')
+      }
       const getCasStmt = this.db.prepare(
         'SELECT payload_json FROM cas_extractions WHERE content_hash = ?',
       )
@@ -207,8 +372,8 @@ export class RepositoryShard {
         'INSERT OR REPLACE INTO cas_extractions(content_hash, payload_json) VALUES (?, ?)',
       )
       const upsertFileStmt = this.db.prepare(`
-        INSERT INTO files(rel_path, content_hash, mtime_ms, byte_size, lang, token_estimate, is_hub, summary, headings)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files(rel_path, content_hash, mtime_ms, byte_size, lang, token_estimate, is_hub, summary, headings, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(rel_path) DO UPDATE SET
           content_hash = excluded.content_hash,
           mtime_ms = excluded.mtime_ms,
@@ -217,7 +382,8 @@ export class RepositoryShard {
           token_estimate = excluded.token_estimate,
           is_hub = excluded.is_hub,
           summary = excluded.summary,
-          headings = excluded.headings
+          headings = excluded.headings,
+          indexed_at = excluded.indexed_at
         RETURNING file_id
       `)
 
@@ -230,8 +396,9 @@ export class RepositoryShard {
       const insertSymStmt = this.db.prepare(`
         INSERT INTO symbols(
           file_id, rel_path, name, qualified_name, kind, exported,
-          start_line, end_line, signature, body_hash, token_estimate, doc_summary, slice_text, is_hub
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          start_line, end_line, signature, body_hash, token_estimate, doc_summary, slice_text, is_hub,
+          scope, parent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING sym_id
       `)
       const insertFtsSymStmt = this.db.prepare(`
@@ -263,18 +430,19 @@ export class RepositoryShard {
 
         if (!force && prev && prev.content_hash === scanned.contentHash) {
           this.db
-            .prepare('UPDATE files SET mtime_ms = ?, byte_size = ? WHERE file_id = ?')
-            .run(fp.mtimeMs, fp.byteSize, prev.file_id)
+            .prepare('UPDATE files SET mtime_ms = ?, byte_size = ?, indexed_at = ? WHERE file_id = ?')
+            .run(fp.mtimeMs, fp.byteSize, now, prev.file_id)
           continue
         }
 
         let extraction: ExtractionResult
-        const cachedCas = getCasStmt.get(scanned.contentHash) as { payload_json: string } | undefined
+        const casKey = this.casKey(scanned.contentHash, scanned.relPath)
+        const cachedCas = getCasStmt.get(casKey) as { payload_json: string } | undefined
         if (cachedCas) {
           extraction = JSON.parse(cachedCas.payload_json) as ExtractionResult
         } else {
           extraction = this.extractor.extract(scanned)
-          putCasStmt.run(scanned.contentHash, JSON.stringify(extraction))
+          putCasStmt.run(casKey, JSON.stringify(extraction))
         }
 
         const fileRow = upsertFileStmt.get(
@@ -287,20 +455,24 @@ export class RepositoryShard {
           extraction.isHub ? 1 : 0,
           extraction.summary,
           extraction.headings,
+          now,
         ) as { file_id: number }
 
         const fileId = fileRow.file_id
 
-        // Record previous signatures in symbol_history for Contract Drift detection
-        const oldSyms = this.db
-          .prepare('SELECT qualified_name, signature, body_hash FROM symbols WHERE file_id = ?')
-          .all(fileId) as Array<{ qualified_name: string; signature: string; body_hash: string }>
-        const upsertHist = this.db.prepare(`
-          INSERT OR REPLACE INTO symbol_history(qualified_name, prev_signature, prev_body_hash, updated_at)
-          VALUES (?, ?, ?, ?)
-        `)
-        for (const os of oldSyms) {
-          upsertHist.run(os.qualified_name, os.signature, os.body_hash, now)
+        // Record previous signatures in symbol_history for Contract Drift detection — only when the
+        // content changed: a forced re-extraction of an unchanged file must not reset the baseline.
+        if (prev && prev.content_hash !== scanned.contentHash) {
+          const oldSyms = this.db
+            .prepare('SELECT qualified_name, signature, body_hash FROM symbols WHERE file_id = ?')
+            .all(fileId) as Array<{ qualified_name: string; signature: string; body_hash: string }>
+          const upsertHist = this.db.prepare(`
+            INSERT OR REPLACE INTO symbol_history(qualified_name, prev_signature, prev_body_hash, updated_at)
+            VALUES (?, ?, ?, ?)
+          `)
+          for (const os of oldSyms) {
+            upsertHist.run(os.qualified_name, os.signature, os.body_hash, now)
+          }
         }
 
         delSymbolsByFile.run(fileId)
@@ -333,6 +505,8 @@ export class RepositoryShard {
             sym.docSummary,
             sym.sliceText,
             extraction.isHub ? 1 : 0,
+            sym.scope ?? 'module',
+            sym.parent ?? null,
           ) as { sym_id: number }
 
           insertFtsSymStmt.run(
@@ -390,15 +564,20 @@ export class RepositoryShard {
         this.cachedGraph = null
       }
 
-      this.db
-        .prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)')
-        .run('last_indexed_at', new Date().toISOString())
+      const setMeta = this.db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)')
+      if (updatedFiles > 0 || removedFiles > 0 || force) {
+        setMeta.run('last_indexed_at', new Date().toISOString())
+      }
+      if (force) setMeta.run('extractor_version', EXTRACTOR_VERSION)
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
       throw err
     }
 
+    if (force) this.needsFullReextract = false
+    this.lastSyncAtIso = new Date().toISOString()
+    if (updatedFiles > 0 || removedFiles > 0 || force) this.maybeCheckpointWal(true)
     this.lastSyncEpochMs = Date.now()
     const elapsedMs = Math.round((performance.now() - t0) * 100) / 100
     return {
@@ -407,6 +586,141 @@ export class RepositoryShard {
       removedFiles,
       elapsedMs,
     }
+  }
+
+
+  /** The payload carries path-qualified names, so identical files at two paths get two entries. */
+  private casKey(contentHash: string, relPath: string): string {
+    return `${EXTRACTOR_VERSION}:${relPath}:${contentHash}`
+  }
+
+  /**
+   * Targeted freshness check for a single file (K4): if its mtime/size on disk differ from
+   * the indexed row (or it is not indexed yet), bypass the throttle and resync now.
+   */
+  refreshFile(relPath: string): boolean {
+    if (!relPath) return false
+    const abs = join(this.repositoryPath, ...relPath.split('/'))
+    let st: { mtimeMs: number; size: number } | null = null
+    try {
+      const s = statSync(abs)
+      if (s.isDirectory()) return false
+      st = { mtimeMs: Math.trunc(s.mtimeMs), size: s.size }
+    } catch {
+      st = null
+    }
+    const row = this.db
+      .prepare('SELECT mtime_ms, byte_size FROM files WHERE lower(rel_path) = ?')
+      .get(relPath.toLowerCase()) as { mtime_ms: number; byte_size: number } | undefined
+    // A file the firewall would not admit is never indexed: not "stale" (that would force a walk per call).
+    if (!row && st !== null && this.firewall.explainExclusion(this.repositoryPath, relPath) !== null) return false
+    const stale = st === null ? Boolean(row) : !row || row.mtime_ms !== st.mtimeMs || row.byte_size !== st.size
+    if (!stale) return false
+    this.lastSyncEpochMs = 0
+    this.sync(false)
+    return true
+  }
+
+  lockSymbols(
+    locks: Array<{ qualifiedName: string; relPath: string; mode: 'allow_body_only' | 'frozen' }>,
+  ): number {
+    this.sync(false)
+    let locked = 0
+    const now = new Date().toISOString()
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO symbol_locks (qualified_name, rel_path, lock_mode, baseline_signature, baseline_body_hash, locked_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const l of locks) {
+        const sym = this.db
+          .prepare('SELECT signature, body_hash FROM symbols WHERE qualified_name = ? OR name = ?')
+          .get(l.qualifiedName, l.qualifiedName) as
+          | { signature: string; body_hash: string }
+          | undefined
+        if (sym) {
+          stmt.run(l.qualifiedName, l.relPath, l.mode, sym.signature, sym.body_hash, now)
+          locked++
+        }
+      }
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    return locked
+  }
+
+  unlockAllSymbols(): void {
+    this.db.exec('DELETE FROM symbol_locks')
+  }
+
+  verifySymbolLocks(): Array<{ qualifiedName: string; relPath: string; violation: string }> {
+    this.lastSyncEpochMs = 0
+    this.sync(false)
+    const violations: Array<{ qualifiedName: string; relPath: string; violation: string }> = []
+    try {
+      const locks = this.db.prepare('SELECT * FROM symbol_locks').all() as Array<{
+        qualified_name: string
+        rel_path: string
+        lock_mode: string
+        baseline_signature: string
+        baseline_body_hash: string
+      }>
+      for (const lock of locks) {
+        const sym = this.db
+          .prepare('SELECT signature, body_hash FROM symbols WHERE qualified_name = ? OR name = ?')
+          .get(lock.qualified_name, lock.qualified_name) as
+          | { signature: string; body_hash: string }
+          | undefined
+        if (!sym) {
+          violations.push({
+            qualifiedName: lock.qualified_name,
+            relPath: lock.rel_path,
+            violation: 'Symbol deleted',
+          })
+          continue
+        }
+        if (lock.lock_mode === 'frozen' && sym.body_hash !== lock.baseline_body_hash) {
+          violations.push({
+            qualifiedName: lock.qualified_name,
+            relPath: lock.rel_path,
+            violation: 'Frozen symbol body modified',
+          })
+        } else if (
+          lock.lock_mode === 'allow_body_only' &&
+          sym.signature !== lock.baseline_signature
+        ) {
+          violations.push({
+            qualifiedName: lock.qualified_name,
+            relPath: lock.rel_path,
+            violation: 'Symbol signature modified (only body modifications were allowed)',
+          })
+        }
+      }
+    } catch {}
+    return violations
+  }
+
+  scanRepoSlop(): SlopFinding[] {
+    this.sync(false)
+    const slops: SlopFinding[] = []
+    try {
+      // Only the extraction of each file's CURRENT content: the CAS also keeps payloads of
+      // older versions, which used to resurface findings on lines already fixed.
+      const rows = this.db
+        .prepare(
+          `SELECT f.rel_path AS relPath, c.payload_json AS payload
+           FROM files f JOIN cas_extractions c ON c.content_hash = ? || f.rel_path || ':' || f.content_hash`,
+        )
+        .all(`${EXTRACTOR_VERSION}:`) as Array<{ relPath: string; payload: string }>
+      for (const row of rows) {
+        const ext = JSON.parse(row.payload) as ExtractionResult
+        for (const f of ext.slopFindings ?? []) slops.push({ ...f, relPath: row.relPath })
+      }
+    } catch {}
+    return slops;
   }
 
   private rebuildResolvedFileEdges(): void {
@@ -429,10 +743,12 @@ export class RepositoryShard {
       weight: number
     }>
 
+    const fileById = new Map<number, string>()
     const fileByBasename = new Map<string, number[]>()
     const fileByRelNoExt = new Map<string, number>()
 
     for (const f of files) {
+      fileById.set(f.file_id, f.rel_path)
       const noExt = f.rel_path.replace(/\.\w+$/, '').toLowerCase()
       fileByRelNoExt.set(noExt, f.file_id)
       const base = (f.rel_path.split('/').pop() ?? f.rel_path).replace(/\.\w+$/, '').toLowerCase()
@@ -450,32 +766,47 @@ export class RepositoryShard {
     }
 
     const edgeAccumulator = new Map<string, { src: number; dst: number; weight: number }>()
-    const addEdge = (src: number, dst: number, w: number) => {
+    const addEdge = (src: number, dst: number, w: number, isImport = false) => {
       if (src === dst) return
       const key = `${src}:${dst}`
+      const maxCap = isImport ? 10 : 0.75
       const cur = edgeAccumulator.get(key)
       if (cur) {
-        cur.weight = Math.min(10, cur.weight + w)
+        cur.weight = isImport
+          ? Math.min(10, Math.max(cur.weight, 1.5) + w)
+          : Math.min(Math.max(cur.weight, maxCap), cur.weight + w)
       } else {
-        edgeAccumulator.set(key, { src, dst, weight: w })
+        edgeAccumulator.set(key, { src, dst, weight: Math.min(maxCap, w) })
       }
     }
 
     for (const e of rawEdges) {
       if (e.dst_path_hint) {
+        const srcRel = fileById.get(e.src_file_id)
+        if (srcRel && e.dst_path_hint.startsWith('.')) {
+          const resolvedRel = posix
+            .normalize(posix.join(posix.dirname(srcRel), e.dst_path_hint))
+            .replace(/\.\w+$/, '')
+            .toLowerCase()
+          const exactRelId = fileByRelNoExt.get(resolvedRel)
+          if (exactRelId) {
+            addEdge(e.src_file_id, exactRelId, Math.max(1.5, e.weight * 1.5), true)
+            continue
+          }
+        }
         const cleanHint = e.dst_path_hint
           .replace(/^\.+\//, '')
           .replace(/\.\w+$/, '')
           .toLowerCase()
         const exactId = fileByRelNoExt.get(cleanHint)
         if (exactId) {
-          addEdge(e.src_file_id, exactId, e.weight * 1.5)
+          addEdge(e.src_file_id, exactId, Math.max(1.5, e.weight * 1.5), true)
           continue
         }
         const baseHint = cleanHint.split('/').pop() ?? cleanHint
         const baseTargets = fileByBasename.get(baseHint)
-        if (baseTargets) {
-          for (const dstId of baseTargets) addEdge(e.src_file_id, dstId, e.weight)
+        if (baseTargets && baseTargets.length === 1) {
+          addEdge(e.src_file_id, baseTargets[0], Math.max(1.5, e.weight), true)
           continue
         }
       }
@@ -484,12 +815,12 @@ export class RepositoryShard {
       const symTargets = symbolOwners.get(dstLower)
       if (symTargets && symTargets.length <= 8) {
         for (const dstId of symTargets) {
-          addEdge(e.src_file_id, dstId, e.weight / Math.sqrt(symTargets.length))
+          addEdge(e.src_file_id, dstId, (e.weight * 0.4) / Math.sqrt(symTargets.length), false)
         }
       } else {
         const baseTargets = fileByBasename.get(dstLower)
-        if (baseTargets) {
-          for (const dstId of baseTargets) addEdge(e.src_file_id, dstId, e.weight)
+        if (baseTargets && baseTargets.length <= 3) {
+          for (const dstId of baseTargets) addEdge(e.src_file_id, dstId, e.weight * 0.35, false)
         }
       }
     }
@@ -538,6 +869,10 @@ export class RepositoryShard {
         }
       }
       this.cachedGraph = new CsrGraph(files.length, csrEdges, hubFlags)
+      this.cachedGraph.symbols = files.map((f) => ({
+        qualifiedName: f.relPath,
+        relPath: f.relPath,
+      }))
     }
 
     return {
@@ -547,14 +882,88 @@ export class RepositoryShard {
     }
   }
 
-  search(query: string, limit = 15): SearchHit[] {
+  matchesPathAndCorpus(
+    relPath: string,
+    lang: string,
+    pathFilter?: string,
+    corpusFilter?: string,
+  ): boolean {
+    const normRel = relPath.replace(/\\/g, '/').toLowerCase()
+    if (pathFilter && pathFilter.trim()) {
+      const cleanPath = pathFilter
+        .replace(/\\/g, '/')
+        .replace(/^\.?\//, '')
+        .trim()
+        .toLowerCase()
+      if (cleanPath && !normRel.startsWith(cleanPath) && !normRel.includes('/' + cleanPath) && !normRel.includes(cleanPath)) {
+        return false
+      }
+    }
+
+    if (corpusFilter && corpusFilter.trim()) {
+      const cleanCorpus = corpusFilter.trim().toLowerCase()
+      if (cleanCorpus !== 'all' && cleanCorpus !== 'content') {
+        const l = lang.toLowerCase()
+        if (cleanCorpus === 'docs' || cleanCorpus === 'doc' || cleanCorpus === 'markdown') {
+          if (l !== 'markdown' && !normRel.endsWith('.md') && !normRel.endsWith('.mdx') && !normRel.endsWith('.txt')) {
+            return false
+          }
+        } else if (cleanCorpus === 'sql' || cleanCorpus === 'schema' || cleanCorpus === 'db') {
+          if (l !== 'sql' && l !== 'prisma' && !normRel.endsWith('.sql') && !normRel.endsWith('.prisma')) {
+            return false
+          }
+        } else if (cleanCorpus === 'code') {
+          if (!['typescript', 'javascript', 'python', 'go', 'powershell'].includes(l)) {
+            return false
+          }
+        }
+      }
+    }
+
+    return true
+  }
+
+  computeAuthorityMultiplier(relPath: string, docSummary = '', sliceText = ''): number {
+    const normRel = relPath.replace(/\\/g, '/').toLowerCase()
+    const combinedMeta = `${docSummary} ${sliceText.slice(0, 600)}`
+    if (
+      normRel.startsWith('current/') ||
+      normRel.includes('/current/') ||
+      combinedMeta.includes('CURRENT_USER_CONFIRMED')
+    ) {
+      return 1.45
+    }
+    if (
+      normRel.startsWith('legacy-') ||
+      normRel.includes('/legacy-') ||
+      combinedMeta.includes('LEGACY_IDEA')
+    ) {
+      return 0.85
+    }
+    return 1.0
+  }
+
+  search(query: string, limitOrOptions: number | SearchOptions = 15): SearchHit[] {
     this.sync(false)
+    const opts: SearchOptions =
+      typeof limitOrOptions === 'number' ? { limit: limitOrOptions } : limitOrOptions
+    const limit = Math.max(1, opts.limit ?? 15)
+    let pathFilter = opts.path
+    if (pathFilter && pathFilter.trim()) {
+      const resolved = this.resolveRepoPath(pathFilter)
+      if (!resolved.ok) return []
+      pathFilter = resolved.relPath || undefined
+    }
+    const corpusFilter = opts.corpus
+    const queryLower = query.trim().toLowerCase()
+
     const terms = this.buildFtsQueryTerms(query)
     if (terms.length === 0) return []
 
     const ftsExpr = terms.join(' OR ')
     const hits: SearchHit[] = []
     const seenSymIds = new Set<number>()
+    const seenFilesInHits = new Set<string>()
 
     try {
       const rows = this.db
@@ -562,6 +971,7 @@ export class RepositoryShard {
           `SELECT
             CAST(f.sym_id AS INTEGER) AS symId,
             s.rel_path AS relPath,
+            fi.lang AS lang,
             s.name AS symbolName,
             s.qualified_name AS qualifiedName,
             s.kind AS kind,
@@ -569,17 +979,21 @@ export class RepositoryShard {
             s.end_line AS endLine,
             s.signature AS signature,
             s.doc_summary AS docSummary,
+            s.slice_text AS sliceText,
             s.is_hub AS isHub,
+            s.scope AS scope,
             bm25(fts_symbols, 0.0, 0.0, 3.0, 4.5, 2.5, 2.0, 1.0) AS rawBm25
            FROM fts_symbols f
            JOIN symbols s ON s.sym_id = CAST(f.sym_id AS INTEGER)
+           JOIN files fi ON fi.file_id = s.file_id
            WHERE fts_symbols MATCH ?
            ORDER BY rawBm25 ASC
            LIMIT ?`,
         )
-        .all(ftsExpr, limit * 3) as Array<{
+        .all(ftsExpr, Math.max(limit * 5, 60)) as Array<{
         symId: number
         relPath: string
+        lang: string
         symbolName: string
         qualifiedName: string
         kind: string
@@ -587,15 +1001,22 @@ export class RepositoryShard {
         endLine: number
         signature: string
         docSummary: string
+        sliceText: string
         isHub: number
+        scope: string
         rawBm25: number
       }>
 
       for (const r of rows) {
         if (seenSymIds.has(r.symId)) continue
+        // Locals (consts inside functions, inner helpers) only surface for an exact-name query.
+        if (r.scope === 'local' && r.symbolName.toLowerCase() !== queryLower) continue
+        if (!this.matchesPathAndCorpus(r.relPath, r.lang, pathFilter, corpusFilter)) continue
         seenSymIds.add(r.symId)
+        seenFilesInHits.add(r.relPath)
         let score = Math.abs(r.rawBm25)
         if (r.isHub) score *= 0.45
+        score *= this.computeAuthorityMultiplier(r.relPath, r.docSummary, r.sliceText)
         hits.push({
           relPath: r.relPath,
           symbolName: r.symbolName,
@@ -608,8 +1029,56 @@ export class RepositoryShard {
           docSummary: r.docSummary,
         })
       }
+
+      // Supplement with file-level body matches (e.g. large tables/documents where term is outside symbol headers)
+      const fileRows = this.db
+        .prepare(
+          `SELECT
+            CAST(ff.file_id AS INTEGER) AS fileId,
+            fi.rel_path AS relPath,
+            fi.lang AS lang,
+            fi.summary AS summary,
+            fi.headings AS headings,
+            fi.is_hub AS isHub,
+            bm25(fts_files, 0.0, 4.0, 3.5, 2.5, 1.2) AS rawBm25
+           FROM fts_files ff
+           JOIN files fi ON fi.file_id = CAST(ff.file_id AS INTEGER)
+           WHERE fts_files MATCH ?
+           ORDER BY rawBm25 ASC
+           LIMIT ?`,
+        )
+        .all(ftsExpr, Math.max(limit * 3, 30)) as Array<{
+        fileId: number
+        relPath: string
+        lang: string
+        summary: string
+        headings: string
+        isHub: number
+        rawBm25: number
+      }>
+
+      for (const fr of fileRows) {
+        if (seenFilesInHits.has(fr.relPath)) continue
+        if (!this.matchesPathAndCorpus(fr.relPath, fr.lang, pathFilter, corpusFilter)) continue
+        seenFilesInHits.add(fr.relPath)
+        let score = Math.abs(fr.rawBm25) * 0.9
+        if (fr.isHub) score *= 0.45
+        score *= this.computeAuthorityMultiplier(fr.relPath, fr.summary, fr.headings)
+        const baseName = fr.relPath.split('/').pop() ?? fr.relPath
+        hits.push({
+          relPath: fr.relPath,
+          symbolName: baseName,
+          qualifiedName: `${fr.relPath}#file`,
+          kind: 'section',
+          startLine: 1,
+          endLine: 1,
+          score: Math.round(score * 1000) / 1000,
+          signature: fr.headings || baseName,
+          docSummary: fr.summary,
+        })
+      }
     } catch {
-      // Fallback to LIKE search if special characters in query
+      // Fallback if FTS syntax encounters edge-case characters
     }
 
     hits.sort((a, b) => b.score - a.score)
@@ -619,9 +1088,13 @@ export class RepositoryShard {
   affectedTests(changedFiles: string[]): string[] {
     this.sync(false)
     const { graph, fileIdToIndex, indexToFile } = this.getCsrGraph()
-    const normalizedInputs = changedFiles.map((f) =>
-      f.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase(),
-    )
+    const normalizedInputs = changedFiles
+      .map((f) => {
+        const r = this.resolveRepoPath(f)
+        return r.ok ? r.relPath : ''
+      })
+      .filter(Boolean)
+      .map((f) => f.toLowerCase())
 
     const startNodes: number[] = []
     for (let i = 0; i < indexToFile.length; i++) {
@@ -675,9 +1148,9 @@ export class RepositoryShard {
       .prepare(
         `SELECT DISTINCT file_id, rel_path, name, kind, start_line
          FROM symbols
-         WHERE lower(name) = ? OR lower(rel_path) LIKE ?`,
+         WHERE lower(name) = ? OR lower(rel_path) LIKE ? ESCAPE '\\'`,
       )
-      .all(lowerTarget, `%${lowerTarget}%`) as Array<{
+      .all(lowerTarget, `%${likeEscape(lowerTarget)}%`) as Array<{
       file_id: number
       rel_path: string
       name: string
@@ -760,98 +1233,270 @@ export class RepositoryShard {
     }
   }
 
-  fileOutline(fileQuery: string): {
-    relPath: string
-    tokenEstimate: number
-    outlineTokens: number
-    symbols: Array<{
-      name: string
-      kind: string
-      startLine: number
-      endLine: number
-      signature: string
-      docSummary: string
-    }>
-  } | null {
-    this.sync(false)
-    const norm = fileQuery.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
-    const fileRow = this.db
+  /** Finds the indexed row for a file argument (exact, then path-suffix, then substring). */
+  private findFileRow(rel: string): {
+    row?: { file_id: number; rel_path: string; token_estimate: number }
+    others: string[]
+  } {
+    const norm = rel.toLowerCase()
+    const exact = this.db
+      .prepare('SELECT file_id, rel_path, token_estimate FROM files WHERE lower(rel_path) = ?')
+      .get(norm) as { file_id: number; rel_path: string; token_estimate: number } | undefined
+    if (exact) return { row: exact, others: [] }
+    const suffix = this.db
       .prepare(
-        `SELECT file_id, rel_path, token_estimate
-         FROM files
-         WHERE lower(rel_path) = ? OR lower(rel_path) LIKE ?
-         ORDER BY length(rel_path) ASC
-         LIMIT 1`,
+        `SELECT file_id, rel_path, token_estimate FROM files
+         WHERE lower(rel_path) LIKE ? ESCAPE '\\' ORDER BY length(rel_path) ASC LIMIT 6`,
       )
-      .get(norm, `%${norm}`) as
-      | { file_id: number; rel_path: string; token_estimate: number }
-      | undefined
+      .all(`%/${likeEscape(norm)}`) as Array<{ file_id: number; rel_path: string; token_estimate: number }>
+    if (suffix.length > 0) return { row: suffix[0], others: suffix.slice(1).map((r) => r.rel_path) }
+    return { others: [] }
+  }
 
-    if (!fileRow) return null
+  /** Similar indexed file paths, used when a file argument matches nothing. */
+  private suggestFiles(rel: string, limit = 5): string[] {
+    const base = (rel.split('/').pop() ?? rel).replace(/\.\w+$/, '').toLowerCase()
+    if (!base) return []
+    return (
+      this.db
+        .prepare("SELECT rel_path FROM files WHERE lower(rel_path) LIKE ? ESCAPE '\\' ORDER BY length(rel_path) ASC LIMIT ?")
+        .all(`%${likeEscape(base)}%`, limit) as Array<{ rel_path: string }>
+    ).map((r) => r.rel_path)
+  }
 
-    const syms = this.db
+  fileOutline(fileQuery: string, opts: { scope?: OutlineScope } = {}): FileOutlineResult {
+    const scope: OutlineScope = opts.scope ?? 'topo'
+    const resolved = this.resolveRepoPath(fileQuery)
+    if (!resolved.ok) return { found: false, reason: resolved.reason, suggestions: [] }
+    const rel = resolved.relPath
+    if (!rel) return { found: false, reason: 'informe um arquivo, não a raiz do repositório', suggestions: [] }
+
+    this.refreshFile(rel)
+    this.sync(false)
+    let match = this.findFileRow(rel)
+    if (!match.row) {
+      const why = this.firewall.explainExclusion(this.repositoryPath, rel)
+      if (why === null) {
+        // Admissible but missing: index right now instead of answering empty.
+        this.lastSyncEpochMs = 0
+        this.sync(false)
+        match = this.findFileRow(rel)
+      }
+      if (!match.row) {
+        return {
+          found: false,
+          relPath: rel,
+          reason: why ? `arquivo não indexado: ${why}` : 'arquivo não indexado (não encontrado após reindexar)',
+          suggestions: this.suggestFiles(rel),
+        }
+      }
+    }
+    const fileRow = match.row
+
+    const all = this.db
       .prepare(
-        `SELECT name, kind, start_line AS startLine, end_line AS endLine, signature, doc_summary AS docSummary
+        `SELECT name, qualified_name AS qualifiedName, kind, scope, exported,
+                start_line AS startLine, end_line AS endLine, signature, doc_summary AS docSummary
          FROM symbols
          WHERE file_id = ?
-         ORDER BY start_line ASC`,
+         ORDER BY start_line ASC, end_line DESC`,
       )
-      .all(fileRow.file_id) as Array<{
-      name: string
-      kind: string
-      startLine: number
-      endLine: number
-      signature: string
-      docSummary: string
-    }>
+      .all(fileRow.file_id) as Array<Omit<OutlineSymbol, 'exported' | 'qualifiedName'> & { exported: number; qualifiedName: string }>
 
-    const outlineText = syms.map((s) => `${s.signature} // L${s.startLine}-${s.endLine}`).join('\n')
+    const visible = all.filter((s) => {
+      if (scope === 'tudo') return true
+      if (scope === 'exportado') return s.exported === 1 && s.scope !== 'local'
+      return s.scope !== 'local'
+    })
+    const symbols: OutlineSymbol[] = visible.map((s) => ({
+      ...s,
+      qualifiedName: s.qualifiedName.slice(s.qualifiedName.indexOf('#') + 1),
+      exported: s.exported === 1,
+    }))
+
+    const outlineText = symbols.map((s) => `${s.signature} // L${s.startLine}-${s.endLine}`).join('\n')
     return {
+      found: true,
       relPath: fileRow.rel_path,
       tokenEstimate: fileRow.token_estimate,
       outlineTokens: Math.max(1, Math.ceil(outlineText.length / 4)),
-      symbols: syms,
+      scope,
+      hiddenSymbols: all.length - visible.length,
+      otherMatches: match.others.length ? match.others : undefined,
+      reason: all.length === 0 ? 'arquivo indexado, mas sem declarações reconhecidas' : undefined,
+      symbols,
     }
   }
 
-  readSymbol(symbolQuery: string): Array<{
-    relPath: string
-    name: string
-    qualifiedName: string
-    kind: string
-    startLine: number
-    endLine: number
-    signature: string
-    docSummary: string
-    tokens: number
-    sliceText: string
-  }> {
+  /**
+   * Reads symbols by name. Accepts `name`, `Class.member`, `path#name` or `path:name`.
+   * Exact name/qualified matches win; locals rank last.
+   */
+  readSymbol(symbolQuery: string, opts: { path?: string } = {}): SymbolSlice[] {
+    let query = symbolQuery.trim()
+    let pathFilter = opts.path
+    const hashIdx = query.lastIndexOf('#')
+    const colonIdx = query.lastIndexOf(':')
+    const looksLikePath = (p: string) => /[\\/]/.test(p) || /\.\w{1,5}$/.test(p)
+    if (hashIdx > 0 && looksLikePath(query.slice(0, hashIdx))) {
+      pathFilter = pathFilter ?? query.slice(0, hashIdx)
+      query = query.slice(hashIdx + 1)
+    } else if (colonIdx > 1 && /\.\w+$/.test(query.slice(0, colonIdx))) {
+      pathFilter = pathFilter ?? query.slice(0, colonIdx)
+      query = query.slice(colonIdx + 1)
+    }
+    let relFilter = ''
+    if (pathFilter) {
+      const r = this.resolveRepoPath(pathFilter)
+      if (!r.ok) return []
+      relFilter = r.relPath.toLowerCase()
+      this.refreshFile(r.relPath)
+    }
     this.sync(false)
-    const lower = symbolQuery.toLowerCase()
-    return this.db
-      .prepare(
-        `SELECT
-          rel_path AS relPath, name, qualified_name AS qualifiedName,
-          kind, start_line AS startLine, end_line AS endLine,
-          signature, doc_summary AS docSummary,
-          token_estimate AS tokens, slice_text AS sliceText
-         FROM symbols
-         WHERE lower(name) = ? OR lower(qualified_name) LIKE ?
-         ORDER BY exported DESC, token_estimate ASC
-         LIMIT 5`,
-      )
-      .all(lower, `%${lower}%`) as Array<{
-      relPath: string
-      name: string
-      qualifiedName: string
-      kind: string
-      startLine: number
-      endLine: number
-      signature: string
-      docSummary: string
-      tokens: number
-      sliceText: string
-    }>
+
+    const run = (): SymbolSlice[] => {
+      const lower = query.toLowerCase()
+      const rows = this.db
+        .prepare(
+          `SELECT
+            rel_path AS relPath, name, qualified_name AS qualifiedName,
+            kind, scope, start_line AS startLine, end_line AS endLine,
+            signature, doc_summary AS docSummary,
+            token_estimate AS tokens, slice_text AS sliceText,
+            CASE
+              WHEN lower(qualified_name) LIKE '%#' || ? ESCAPE '\\' THEN 0
+              WHEN lower(name) = ? THEN 1
+              WHEN lower(qualified_name) LIKE '%.' || ? ESCAPE '\\' THEN 2
+              ELSE 3
+            END AS rank
+           FROM symbols
+           WHERE (lower(name) = ? OR lower(qualified_name) LIKE '%#' || ? ESCAPE '\\' OR lower(qualified_name) LIKE '%.' || ? ESCAPE '\\')
+             AND (? = '' OR lower(rel_path) = ? OR lower(rel_path) LIKE '%/' || ? ESCAPE '\\' OR lower(rel_path) LIKE ? || '/%' ESCAPE '\\')
+           ORDER BY rank ASC, CASE scope WHEN 'local' THEN 1 ELSE 0 END ASC, exported DESC, token_estimate ASC
+           LIMIT 5`,
+        )
+        .all(likeEscape(lower), lower, likeEscape(lower), lower, likeEscape(lower), likeEscape(lower), relFilter, relFilter, likeEscape(relFilter), likeEscape(relFilter)) as Array<
+        SymbolSlice & { rank: number }
+      >
+      return rows.map(({ rank: _rank, ...rest }) => rest)
+    }
+
+    let results = run()
+    // Freshness: if any matched file changed on disk since indexing, resync and re-read.
+    const stale = [...new Set(results.map((r) => r.relPath))].some((rp) => this.refreshFile(rp))
+    if (stale) results = run()
+    return results
+  }
+
+  /** Names close to a symbol query, used to explain an empty read_symbol. */
+  similarSymbolNames(symbolQuery: string, limit = 8): string[] {
+    const q = symbolQuery.replace(/^.*[#:]/, '').toLowerCase()
+    const tail = q.split('.').pop() ?? q
+    if (tail.length < 3) return []
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT substr(qualified_name, instr(qualified_name, '#') + 1) AS qn
+           FROM symbols WHERE lower(name) LIKE ? ESCAPE '\\' AND scope != 'local'
+           ORDER BY length(name) ASC LIMIT ?`,
+        )
+        .all(`%${likeEscape(tail.slice(0, Math.max(3, Math.min(tail.length, 12))))}%`, limit) as Array<{ qn: string }>
+    ).map((r) => r.qn)
+  }
+
+  /**
+   * Built-in text search over the indexed files (the "ripgrep" fallback used when the
+   * symbol index has no answer). Scores lines by how many distinct terms they contain.
+   */
+  textSearch(
+    terms: string[],
+    opts: { path?: string; limit?: number; wholeWord?: boolean } = {},
+  ): TextHit[] {
+    const fold = (t: string) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    const cleanTerms = [...new Set(terms.map(fold).filter((t) => t.length >= 2))].slice(0, 12)
+    if (cleanTerms.length === 0) return []
+    const limit = opts.limit ?? 15
+    let relFilter = ''
+    if (opts.path) {
+      const r = this.resolveRepoPath(opts.path)
+      if (!r.ok) return []
+      relFilter = r.relPath.toLowerCase()
+    }
+    const files = (
+      this.db.prepare('SELECT rel_path FROM files ORDER BY rel_path ASC').all() as Array<{ rel_path: string }>
+    )
+      .map((r) => r.rel_path)
+      .filter((rp) => !relFilter || rp.toLowerCase() === relFilter || rp.toLowerCase().startsWith(relFilter + '/'))
+      .slice(0, 4000)
+    const escape = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regexes = cleanTerms.map((t) => new RegExp(opts.wholeWord ? `\\b${escape(t)}\\b` : escape(t)))
+    const minTerms = cleanTerms.length === 1 ? 1 : Math.min(2, cleanTerms.length)
+    const hits: TextHit[] = []
+    let bytes = 0
+    for (const rp of files) {
+      if (bytes > 48 * 1024 * 1024) break
+      let content: string
+      try {
+        content = readFileSync(join(this.repositoryPath, ...rp.split('/')), 'utf8')
+      } catch {
+        continue
+      }
+      bytes += content.length
+      const pathFolded = fold(rp)
+      const lines = content.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const folded = fold(lines[i])
+        let matched = 0
+        for (let k = 0; k < regexes.length; k++) {
+          if (regexes[k].test(folded) || regexes[k].test(pathFolded)) matched++
+        }
+        if (matched >= minTerms && regexes.some((re) => re.test(folded))) {
+          hits.push({ relPath: rp, line: i + 1, text: lines[i].trim().slice(0, 220), matchedTerms: matched })
+        }
+      }
+    }
+    hits.sort((a, b) => b.matchedTerms - a.matchedTerms || a.relPath.localeCompare(b.relPath) || a.line - b.line)
+    return hits.slice(0, limit)
+  }
+
+  /** Search with an explicit outcome: index hits, text fallback hits, or the reason for nothing. */
+  searchDetailed(
+    query: string,
+    opts: SearchOptions = {},
+  ): { results: SearchHit[]; total: number; via: 'indice' | 'busca_textual' | 'nenhum'; reason?: string; textHits?: TextHit[] } {
+    if (opts.path && opts.path.trim()) {
+      const r = this.resolveRepoPath(opts.path)
+      if (!r.ok) return { results: [], total: 0, via: 'nenhum', reason: r.reason }
+    }
+    const results = this.search(query, opts)
+    if (results.length > 0) return { results, total: results.length, via: 'indice' }
+
+    const fileCount = (this.db.prepare('SELECT COUNT(*) AS c FROM files').get() as { c: number }).c
+    const terms = this.buildFtsQueryTerms(query).map((t) => t.replace(/^"|"\*$/g, ''))
+    let reason: string
+    if (fileCount === 0) reason = 'índice vazio: nenhum arquivo admitido neste repositório'
+    else if (terms.length === 0) reason = 'consulta sem termos pesquisáveis (só palavras muito curtas ou stopwords)'
+    else reason = 'nenhum símbolo ou documento do índice casou com a consulta'
+    if (opts.path && opts.path.trim()) {
+      const rel = (this.resolveRepoPath(opts.path) as { ok: true; relPath: string }).relPath.toLowerCase()
+      const under = (
+        this.db
+          .prepare("SELECT COUNT(*) AS c FROM files WHERE lower(rel_path) = ? OR lower(rel_path) LIKE ? ESCAPE '\\'")
+          .get(rel, `${likeEscape(rel)}/%`) as { c: number }
+      ).c
+      if (under === 0) reason = `nenhum arquivo indexado sob '${rel}'`
+    }
+    const rawTerms = query
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .split(/[^a-z0-9_/.-]+/)
+      .filter((t) => t.length >= 3)
+    const textHits = this.textSearch(rawTerms, { path: opts.path, limit: opts.limit ?? 15 })
+    if (textHits.length > 0) {
+      return { results: [], total: textHits.length, via: 'busca_textual', reason: `${reason}; resultado via busca textual`, textHits }
+    }
+    return { results: [], total: 0, via: 'nenhum', reason }
   }
 
   callGraph(symbolName: string): {
@@ -876,10 +1521,10 @@ export class RepositoryShard {
         `SELECT f.rel_path AS relPath, r.dst_name AS calleeSymbol, r.kind AS kind
          FROM raw_edges r
          JOIN files f ON f.file_id = r.src_file_id
-         WHERE lower(r.src_sym_name) = ? OR lower(r.src_sym_name) LIKE ?
+         WHERE lower(r.src_sym_name) = ? OR lower(r.src_sym_name) LIKE ? ESCAPE '\\'
          LIMIT 40`,
       )
-      .all(lower, `%.${lower}`) as Array<{ relPath: string; calleeSymbol: string; kind: string }>
+      .all(lower, `%.${likeEscape(lower)}`) as Array<{ relPath: string; calleeSymbol: string; kind: string }>
 
     return { symbol: symbolName, callers, callees }
   }
@@ -889,8 +1534,11 @@ export class RepositoryShard {
     recentlyModifiedFiles: string[]
     contractDrifts: Array<{
       qualifiedName: string
+      relPath: string
+      prevSignature: string
       previousSignature: string
       currentSignature: string
+      breaking: boolean
       affectedCallers: number
     }>
     affectedTests: string[]
@@ -907,21 +1555,34 @@ export class RepositoryShard {
       .prepare(
         `SELECT
           s.qualified_name AS qualifiedName,
+          s.rel_path AS relPath,
           s.name AS symName,
           h.prev_signature AS previousSignature,
           s.signature AS currentSignature
          FROM symbols s
          JOIN symbol_history h ON h.qualified_name = s.qualified_name
-         WHERE h.prev_signature != s.signature`,
+         WHERE h.prev_signature != s.signature
+           AND h.updated_at >= ?
+           AND s.exported = 1
+           AND s.scope != 'local'`,
       )
-      .all() as Array<{
+      .all(cutoff) as Array<{
       qualifiedName: string
+      relPath: string
       symName: string
       previousSignature: string
       currentSignature: string
     }>
 
-    const contractDrifts = driftRows.map((d) => {
+    // Contract drift is about exported API: test files never define one.
+    const isTestPath = (p: string) =>
+      /(?:^|\/)(?:test|tests|__tests__|spec|specs)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|_test\.go$|(?:^|\/)test_[^/]*\.py$/i.test(p)
+    // A symbol that only gained `export` became public API; no existing caller breaks.
+    const withoutExport = (sig: string) => sig.replace(/^\s*export\s+(?:default\s+)?/, '').replace(/\s+/g, ' ').trim()
+    const contractDrifts = driftRows
+      .filter((d) => !isTestPath(d.relPath))
+      .filter((d) => withoutExport(d.previousSignature) !== withoutExport(d.currentSignature))
+      .map((d) => {
       const callerCount = (
         this.db
           .prepare('SELECT COUNT(*) AS c FROM raw_edges WHERE lower(dst_name) = ?')
@@ -929,8 +1590,11 @@ export class RepositoryShard {
       ).c
       return {
         qualifiedName: d.qualifiedName,
+        relPath: d.relPath,
+        prevSignature: d.previousSignature,
         previousSignature: d.previousSignature,
         currentSignature: d.currentSignature,
+        breaking: true,
         affectedCallers: callerCount,
       }
     })
@@ -1057,10 +1721,18 @@ export class RepositoryShard {
     const normalized = raw
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
       .toLowerCase()
 
-    const rawTokens = normalized.split(/[^a-z0-9_]+/).filter(Boolean)
+    const rawDirect = raw
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .filter(Boolean)
+
+    const rawTokens = [...rawDirect, ...normalized.split(/[^a-z0-9_]+/).filter(Boolean)]
     const cleanTokens: string[] = []
     const seen = new Set<string>()
 
@@ -1104,6 +1776,65 @@ export class RepositoryShard {
       dbSizeBytes,
       walSizeBytes,
       lastIndexedAt: lastRow?.value ?? new Date().toISOString(),
+      schemaVersion: SHARD_SCHEMA_VERSION,
+      extractorVersion: EXTRACTOR_VERSION,
+      indexAge: this.indexAgeSummary(),
+    }
+  }
+
+  private indexAgeSummary(): NonNullable<ShardHealth['indexAge']> {
+    const now = Date.now()
+    const ageRows = this.db
+      .prepare('SELECT rel_path AS relPath, indexed_at AS indexedAt FROM files ORDER BY indexed_at ASC LIMIT 5')
+      .all() as Array<{ relPath: string; indexedAt: number }>
+    const newest = this.db.prepare('SELECT MAX(indexed_at) AS m FROM files').get() as { m: number | null }
+    return {
+      lastSyncAt: this.lastSyncAtIso || null,
+      newestFileIndexedAt: newest.m ? new Date(newest.m).toISOString() : null,
+      oldestFiles: ageRows.map((r) => ({
+        relPath: r.relPath,
+        indexedAt: r.indexedAt ? new Date(r.indexedAt).toISOString() : null,
+        ageSeconds: r.indexedAt ? Math.round((now - r.indexedAt) / 1000) : null,
+      })),
+    }
+  }
+
+  /** Index age of one file: when it was indexed and whether the disk copy is newer. */
+  fileIndexAge(fileQuery: string): {
+    relPath: string
+    indexedAt: string | null
+    ageSeconds: number | null
+    staleOnDisk: boolean
+    reason?: string
+  } {
+    const r = this.resolveRepoPath(fileQuery)
+    if (!r.ok) return { relPath: fileQuery, indexedAt: null, ageSeconds: null, staleOnDisk: false, reason: r.reason }
+    const row = this.db
+      .prepare('SELECT rel_path, indexed_at, mtime_ms, byte_size FROM files WHERE lower(rel_path) = ?')
+      .get(r.relPath.toLowerCase()) as
+      | { rel_path: string; indexed_at: number; mtime_ms: number; byte_size: number }
+      | undefined
+    if (!row) {
+      return {
+        relPath: r.relPath,
+        indexedAt: null,
+        ageSeconds: null,
+        staleOnDisk: false,
+        reason: this.firewall.explainExclusion(this.repositoryPath, r.relPath) ?? 'arquivo ainda não indexado',
+      }
+    }
+    let staleOnDisk = false
+    try {
+      const st = statSync(join(this.repositoryPath, ...row.rel_path.split('/')))
+      staleOnDisk = Math.trunc(st.mtimeMs) !== row.mtime_ms || st.size !== row.byte_size
+    } catch {
+      staleOnDisk = true
+    }
+    return {
+      relPath: row.rel_path,
+      indexedAt: row.indexed_at ? new Date(row.indexed_at).toISOString() : null,
+      ageSeconds: row.indexed_at ? Math.round((Date.now() - row.indexed_at) / 1000) : null,
+      staleOnDisk,
     }
   }
 

@@ -18,6 +18,7 @@ export type SymbolKind =
   | 'enum'
   | 'function'
   | 'method'
+  | 'property'
   | 'const'
   | 'route'
   | 'model'
@@ -34,6 +35,14 @@ export type EdgeKind =
   | 'mentions_symbol'
 
 export type ContextFidelity = 'full' | 'graded' | 'compact'
+
+export type SearchCorpus = 'all' | 'docs' | 'code' | 'sql' | 'content'
+
+export interface SearchOptions {
+  limit?: number
+  path?: string
+  corpus?: SearchCorpus | string
+}
 
 export interface RepoConfig {
   path: string
@@ -52,11 +61,16 @@ export interface ScannedFile {
   tokenEstimate: number
 }
 
+/** `module` = top level, `member` = class member, `local` = declared inside a function body. */
+export type SymbolScope = 'module' | 'member' | 'local'
+
 export interface ExtractedSymbol {
   name: string
   qualifiedName: string
   kind: SymbolKind
   exported: boolean
+  scope?: SymbolScope
+  parent?: string
   startLine: number
   endLine: number
   signature: string
@@ -64,6 +78,7 @@ export interface ExtractedSymbol {
   tokenEstimate: number
   docSummary: string
   sliceText: string
+  complexity?: number
 }
 
 export interface ExtractedEdge {
@@ -82,6 +97,46 @@ export interface ExtractedRoute {
   framework: string
 }
 
+export interface SlopFinding {
+  relPath: string
+  line: number
+  kind:
+    | 'empty_catch'
+    | 'swallowed_error'
+    | 'todo_placeholder'
+    | 'explicit_any'
+    | 'ts_ignore'
+    | 'stub_return'
+    | 'hardcoded_secret'
+  severity: 'blocker' | 'warning'
+  snippet: string
+  message: string
+}
+
+export interface ArchitectureBoundaryRule {
+  id: string
+  name: string
+  fromGlob: string
+  forbidToGlob: string
+  reason: string
+}
+
+export interface ArchitectureViolation {
+  ruleId: string
+  ruleName: string
+  sourceFile: string
+  sourceSymbol: string
+  targetFile: string
+  targetSymbol: string
+  edgeKind: string
+  reason: string
+}
+
+export interface CycleFinding {
+  symbols: Array<{ qualifiedName: string; relPath: string }>
+  severity: 'warning' | 'blocker'
+}
+
 export interface ExtractionResult {
   isHub: boolean
   summary: string
@@ -89,6 +144,7 @@ export interface ExtractionResult {
   symbols: ExtractedSymbol[]
   edges: ExtractedEdge[]
   routes: ExtractedRoute[]
+  slopFindings?: SlopFinding[]
 }
 
 export interface StoredFileRow {
@@ -132,6 +188,8 @@ export interface ContextRequest {
   view?: 'worktree' | 'git_ref'
   revision?: string
   includeFederation?: boolean
+  path?: string
+  corpus?: SearchCorpus | string
 }
 
 export interface PackedSlice {
@@ -169,6 +227,7 @@ export interface ContextPackResult {
   }>
   slices: PackedSlice[]
   federationLinks: FederationLink[]
+  reusableSymbols?: SearchHit[]
   markdown: string
 }
 
@@ -217,6 +276,13 @@ export interface ShardHealth {
   dbSizeBytes: number
   walSizeBytes: number
   lastIndexedAt: string
+  schemaVersion?: number
+  extractorVersion?: string
+  indexAge?: {
+    lastSyncAt: string | null
+    newestFileIndexedAt: string | null
+    oldestFiles: Array<{ relPath: string; indexedAt: string | null; ageSeconds: number | null }>
+  }
 }
 
 export interface EngineStatus {

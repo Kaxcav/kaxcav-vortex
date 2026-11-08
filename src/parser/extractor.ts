@@ -9,6 +9,15 @@ import type {
   SymbolKind,
 } from '../core/types.ts'
 import { CodeStateMachine } from './lexer.ts'
+import { TsDeclarationScanner, type TsScanResult } from './ts-scanner.ts'
+
+/**
+ * Bump whenever extraction output changes, so cached extractions (CAS) and stored
+ * symbols are rebuilt instead of mixing old and new ranges.
+ */
+export const EXTRACTOR_VERSION = 'x7-scope-ast'
+
+const CODE_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'python', 'go', 'powershell'])
 
 const JS_STOPWORDS = new Set([
   'if',
@@ -67,6 +76,17 @@ const HUB_FILENAME_REGEX =
 
 export class PolyglotExtractor {
   extract(file: ScannedFile): ExtractionResult {
+    const res = this.extractByLanguage(file)
+    // Slop markers are about code: a Markdown heading like `## TODO` is not a code placeholder.
+    res.slopFindings = CODE_LANGS.has(file.lang) ? CodeStateMachine.scanSlop(file.relPath, file.content) : []
+    for (const sym of res.symbols) {
+      sym.complexity = this.computeComplexity(sym.sliceText)
+      sym.scope ??= 'module'
+    }
+    return res
+  }
+
+  private extractByLanguage(file: ScannedFile): ExtractionResult {
     switch (file.lang) {
       case 'typescript':
       case 'javascript':
@@ -85,8 +105,97 @@ export class PolyglotExtractor {
     }
   }
 
+  private computeComplexity(text: string): number {
+    const code = CodeStateMachine.stripStringsAndComments(text)
+    const matches = code.match(/\b(if|else if|for|while|case|catch)\b|&&|\|\||\?/g)
+    return 1 + (matches ? matches.length : 0)
+  }
+
+  private extractCallSitesFromPythonBlock(ownerSym: string, block: string, edges: ExtractedEdge[], routes: ExtractedRoute[]): void {
+    const codeOnly = block.replace(/#.*/g, '')
+    const seen = new Set<string>()
+    const callRegex = /([A-Za-z_]\w*)\s*\(/g
+    let match;
+    while ((match = callRegex.exec(codeOnly)) !== null) {
+      const callee = match[1]
+      if (callee.length < 3 || callee === ownerSym) continue
+      if (seen.has(callee)) continue
+      seen.add(callee)
+      edges.push({ srcSymbolName: ownerSym, dstName: callee, kind: 'calls', weight: 1.0 })
+    }
+    const fetchRegex = /\b(?:requests|httpx)\.(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]/gi
+    let fMatch;
+    while ((fMatch = fetchRegex.exec(block)) !== null) {
+      routes.push({ symbolName: ownerSym, direction: 'consume', method: fMatch[1].toUpperCase(), pathPattern: fMatch[2], framework: 'python-http' })
+      edges.push({ srcSymbolName: ownerSym, dstName: fMatch[2], kind: 'routes_to', weight: 2.0 })
+    }
+  }
+
+  private extractCallSitesFromGoBlock(ownerSym: string, block: string, edges: ExtractedEdge[], routes: ExtractedRoute[]): void {
+    const codeOnly = block.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')
+    const seen = new Set<string>()
+    const callRegex = /(?:\b[\w]+\.)?([A-Za-z_]\w*)\s*\(/g
+    let match;
+    while ((match = callRegex.exec(codeOnly)) !== null) {
+      const callee = match[1]
+      if (callee.length < 3 || callee === ownerSym || callee === 'if' || callee === 'for') continue
+      if (seen.has(callee)) continue
+      seen.add(callee)
+      edges.push({ srcSymbolName: ownerSym, dstName: callee, kind: 'calls', weight: 1.0 })
+    }
+    const fetchRegex = /\b(?:http|client)\.(?:Get|Post|Put|Patch|Delete|Do)\s*\(\s*['"]([^'"]+)['"]/g
+    let fMatch;
+    while ((fMatch = fetchRegex.exec(block)) !== null) {
+      routes.push({ symbolName: ownerSym, direction: 'consume', method: 'ANY', pathPattern: fMatch[1], framework: 'go-http' })
+      edges.push({ srcSymbolName: ownerSym, dstName: fMatch[1], kind: 'routes_to', weight: 2.0 })
+    }
+  }
+
+  
   private hashSlice(text: string): string {
     return createHash('sha256').update(text).digest('hex').slice(0, 16)
+  }
+
+  /** End line (1-based) of a SQL statement: the `;` closing the balanced `( ... )` of CREATE TABLE. */
+  private findSqlStatementEnd(lines: string[], startIdx: number): number {
+    let depth = 0
+    let opened = false
+    let quote = ''
+    let inBlockComment = false
+    for (let li = startIdx; li < lines.length; li++) {
+      const line = lines[li]
+      for (let c = 0; c < line.length; c++) {
+        const ch = line[c]
+        if (inBlockComment) {
+          if (ch === '*' && line[c + 1] === '/') {
+            inBlockComment = false
+            c++
+          }
+          continue
+        }
+        if (quote) {
+          if (ch === quote) quote = ''
+          continue
+        }
+        if (ch === '/' && line[c + 1] === '*') {
+          inBlockComment = true
+          c++
+          continue
+        }
+        if (ch === '-' && line[c + 1] === '-') break
+        if (ch === "'" || ch === '"' || ch === '`') quote = ch
+        else if (ch === '(') {
+          depth++
+          opened = true
+        } else if (ch === ')') depth--
+        else if (ch === ';' && depth <= 0) return li + 1
+      }
+      const nextLine = lines[li + 1] ?? ''
+      if (opened && depth <= 0 && !/^\s*(?:;|WITH|WITHOUT|STRICT|ENGINE|PARTITION|INHERITS|TABLESPACE)/i.test(nextLine)) {
+        return li + 1
+      }
+    }
+    return Math.min(lines.length, startIdx + 1)
   }
 
   private findBlockEnd(lines: string[], startIdx: number, maxSpan = 220): number {
@@ -126,225 +235,99 @@ export class PolyglotExtractor {
     const symbols: ExtractedSymbol[] = []
     const edges: ExtractedEdge[] = []
     const routes: ExtractedRoute[] = []
-    let currentClass: string | null = null
-    let classEndLine = 0
 
-    // 1. Extract imports & re-exports
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      const importMatch =
-        /^\s*(?:import|export)\s+(?:type\s+)?(?:(\{[^}]+\}|\*\s+as\s+\w+|\w+)\s+from\s+)?['"]([^'"]+)['"]/.exec(
-          line,
-        )
-      if (importMatch) {
-        const specifiers = importMatch[1] ?? ''
-        const modPath = importMatch[2]
-        const names = specifiers
-          .replace(/[{}]/g, '')
-          .split(',')
-          .map((s) => s.trim().split(/\s+as\s+/)[0].trim())
-          .filter(Boolean)
+    let scan: TsScanResult
+    try {
+      scan = TsDeclarationScanner.scan(file.content)
+    } catch {
+      return this.extractGeneric(file)
+    }
 
-        if (names.length === 0) {
-          edges.push({
-            srcSymbolName: '__file__',
-            dstName: basename(modPath).replace(/\.\w+$/, ''),
-            dstPathHint: modPath,
-            kind: 'imports',
-            weight: 1.0,
-          })
-        } else {
-          for (const n of names) {
-            edges.push({
-              srcSymbolName: '__file__',
-              dstName: n.replace(/^\*\s*/, ''),
-              dstPathHint: modPath,
-              kind: 'imports',
-              weight: 1.2,
-            })
-          }
-        }
+    // 1. Imports, re-exports, require() and dynamic import()
+    for (const imp of scan.imports) {
+      if (imp.names.length === 0) {
+        edges.push({
+          srcSymbolName: '__file__',
+          dstName: basename(imp.modulePath).replace(/\.\w+$/, ''),
+          dstPathHint: imp.modulePath,
+          kind: 'imports',
+          weight: 1.0,
+        })
+        continue
+      }
+      for (const n of imp.names) {
+        edges.push({
+          srcSymbolName: '__file__',
+          dstName: n,
+          dstPathHint: imp.modulePath,
+          kind: 'imports',
+          weight: 1.2,
+        })
       }
     }
 
-    // 2. Extract Declarations & Routes
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      const lineNo = i + 1
-      if (currentClass && lineNo > classEndLine) {
-        currentClass = null
+    // 2. Declarations (module, class members, locals) and routes, with AST-accurate ranges
+    for (const d of scan.declarations) {
+      const sliceText = lines.slice(d.startLine - 1, d.endLine).join('\n')
+      symbols.push({
+        name: d.name,
+        qualifiedName: `${file.relPath}#${d.qualifiedSuffix}`,
+        kind: d.kind,
+        exported: d.exported,
+        scope: d.scope,
+        parent: d.parent,
+        startLine: d.startLine,
+        endLine: d.endLine,
+        signature: d.signature,
+        bodyHash: this.hashSlice(sliceText),
+        tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
+        docSummary:
+          d.kind === 'route'
+            ? `HTTP Route ${d.routeMethod} ${d.routePath}`
+            : this.extractLeadingDoc(lines, d.startLine - 1),
+        sliceText,
+      })
+
+      if (d.extendsName) {
+        edges.push({ srcSymbolName: d.name, dstName: d.extendsName, kind: 'extends', weight: 1.8 })
       }
-
-      // Class / Interface / Type / Enum
-      const typeDecl =
-        /^\s*(export\s+)?(?:default\s+)?(?:abstract\s+)?(class|interface|type|enum)\s+([A-Za-z_$][\w$]*)(?:\s+extends\s+([A-Za-z_$][\w$.]*))?(?:\s+implements\s+([A-Za-z_$][\w$.,\s]*))?/.exec(
-          line,
-        )
-      if (typeDecl) {
-        const exported = Boolean(typeDecl[1])
-        const kind = typeDecl[2] as SymbolKind
-        const name = typeDecl[3]
-        const extendsTarget = typeDecl[4]
-        const implementsTargets = typeDecl[5]
-        const endLine = this.findBlockEnd(lines, i, 200)
-        const sliceText = lines.slice(i, endLine).join('\n')
-        const signature = line.replace(/\{\s*$/, '').trim()
-
-        if (kind === 'class') {
-          currentClass = name
-          classEndLine = endLine
-        }
-
-        symbols.push({
-          name,
-          qualifiedName: `${file.relPath}#${name}`,
-          kind,
-          exported,
-          startLine: lineNo,
-          endLine,
-          signature,
-          bodyHash: this.hashSlice(sliceText),
-          tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
-          docSummary: this.extractLeadingDoc(lines, i),
-          sliceText,
-        })
-
-        if (extendsTarget) {
-          edges.push({
-            srcSymbolName: name,
-            dstName: extendsTarget.trim(),
-            kind: 'extends',
-            weight: 1.8,
-          })
-        }
-        if (implementsTargets) {
-          for (const impl of implementsTargets.split(',')) {
-            const clean = impl.trim()
-            if (clean) {
-              edges.push({
-                srcSymbolName: name,
-                dstName: clean,
-                kind: 'implements',
-                weight: 1.6,
-              })
-            }
-          }
-        }
-        continue
+      for (const impl of d.implementsNames ?? []) {
+        edges.push({ srcSymbolName: d.name, dstName: impl, kind: 'implements', weight: 1.6 })
       }
-
-      // Function / Const Arrow Function (supports multi-line parameter lists)
-      const fnDecl =
-        /^\s*(export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*[<(]/.exec(
-          line,
-        )
-      const arrowDecl = !fnDecl
-        ? /^\s*(export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=>/.exec(
-            line,
-          )
-        : null
-
-      const fnMatch = fnDecl ?? arrowDecl
-      if (fnMatch) {
-        const exported = Boolean(fnMatch[1])
-        const name = fnMatch[2]
-        const endLine = this.findBlockEnd(lines, i, 160)
-        const sliceText = lines.slice(i, endLine).join('\n')
-        const signature = this.extractSignature(lines, i)
-
-        symbols.push({
-          name,
-          qualifiedName: `${file.relPath}#${name}`,
-          kind: 'function',
-          exported,
-          startLine: lineNo,
-          endLine,
-          signature,
-          bodyHash: this.hashSlice(sliceText),
-          tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
-          docSummary: this.extractLeadingDoc(lines, i),
-          sliceText,
-        })
-        this.extractCallSitesFromBlock(name, sliceText, edges, routes)
-        continue
-      }
-
-      // Class Method (supports multi-line parameters)
-      if (currentClass) {
-        const methodDecl =
-          /^\s*(?:(public|private|protected|readonly|static|async)\s+)*([A-Za-z_$][\w$]*)\s*\(/.exec(
-            line,
-          )
-        if (methodDecl) {
-          const methodName = methodDecl[2]
-          if (!JS_STOPWORDS.has(methodName) && methodName !== 'constructor') {
-            const endLine = this.findBlockEnd(lines, i, 120)
-            const sliceText = lines.slice(i, endLine).join('\n')
-            const qualifiedSym = `${currentClass}.${methodName}`
-            const cleanSig = this.extractSignature(lines, i)
-            symbols.push({
-              name: methodName,
-              qualifiedName: `${file.relPath}#${qualifiedSym}`,
-              kind: 'method',
-              exported: true,
-              startLine: lineNo,
-              endLine,
-              signature: `${currentClass}.${cleanSig}`,
-              bodyHash: this.hashSlice(sliceText),
-              tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
-              docSummary: this.extractLeadingDoc(lines, i),
-              sliceText,
-            })
-            this.extractCallSitesFromBlock(qualifiedSym, sliceText, edges, routes)
-          }
-        }
-      }
-
-      // Express / Fastify / Hono Route Expositions
-      const routeExpose =
-        /\b(?:app|router|server|fastify)\.(get|post|put|patch|delete|all)\s*\(\s*['"`]([^'"`]+)['"`]/i.exec(
-          line,
-        )
-      if (routeExpose) {
-        const method = routeExpose[1].toUpperCase()
-        const pathPattern = routeExpose[2]
-        const routeSym = `${method} ${pathPattern}`
-        const endLine = this.findBlockEnd(lines, i, 60)
-        const sliceText = lines.slice(i, endLine).join('\n')
-        symbols.push({
-          name: routeSym,
-          qualifiedName: `${file.relPath}#${routeSym}`,
-          kind: 'route',
-          exported: true,
-          startLine: lineNo,
-          endLine,
-          signature: `${method} ${pathPattern}`,
-          bodyHash: this.hashSlice(sliceText),
-          tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
-          docSummary: `HTTP Route ${method} ${pathPattern}`,
-          sliceText,
-        })
+      if (d.kind === 'route' && d.routeMethod && d.routePath) {
         routes.push({
-          symbolName: routeSym,
+          symbolName: d.name,
           direction: 'expose',
-          method,
-          pathPattern,
+          method: d.routeMethod,
+          pathPattern: d.routePath,
           framework: 'http-router',
         })
+      }
+      // Locals are already covered by their enclosing symbol's call sites.
+      if (d.callable && d.scope !== 'local') {
+        const owner = d.scope === 'member' ? d.qualifiedSuffix : d.name
+        this.extractCallSitesFromBlock(owner, sliceText, edges, routes)
       }
     }
 
     if (symbols.length === 0) {
-      return this.extractGeneric(file)
+      // Test files (`import …; test(…)`) and barrels (`export * from`) declare nothing, but
+      // their import edges are what `affected` / `blast_radius` follow.
+      const generic = this.extractGeneric(file)
+      return { ...generic, edges, routes }
     }
 
+    const topLevel = symbols.filter((s) => s.scope === 'module')
     return {
-      isHub: symbols.length > 35 || edges.length > 45,
-      summary: symbols
+      isHub: topLevel.length > 35 || edges.length > 45,
+      summary: (topLevel.length > 0 ? topLevel : symbols)
         .slice(0, 8)
         .map((s) => `${s.kind} ${s.name}`)
         .join(', '),
-      headings: symbols.map((s) => s.name).join(' '),
+      headings: symbols
+        .filter((s) => s.scope !== 'local')
+        .map((s) => s.name)
+        .join(' '),
       symbols,
       edges,
       routes,
@@ -400,6 +383,8 @@ export class PolyglotExtractor {
     const symbols: ExtractedSymbol[] = []
     const edges: ExtractedEdge[] = []
     const routes: ExtractedRoute[] = []
+    const classStack: Array<{ name: string; indent: number }> = []
+    const qualifiedSeen = new Map<string, number>()
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
@@ -419,23 +404,61 @@ export class PolyglotExtractor {
       const decl = /^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)\s*(\([^)]*\))?/.exec(line)
       if (decl) {
         const indent = decl[1].length
-        const kind: SymbolKind = decl[2] === 'class' ? 'class' : 'function'
+        while (classStack.length > 0 && classStack[classStack.length - 1].indent >= indent) classStack.pop()
+        const owner = classStack[classStack.length - 1]
+        const isMethod = decl[2] === 'def' && owner !== undefined
+        const kind: SymbolKind = decl[2] === 'class' ? 'class' : isMethod ? 'method' : 'function'
         const name = decl[3]
         let endIdx = i + 1
-        while (endIdx < lines.length && endIdx < i + 120) {
+        let inTripleQuote = ''
+        while (endIdx < lines.length) {
           const next = lines[endIdx]
+          // A docstring/multi-line string may have content at column 0: it never ends the block.
+          const triples = next.match(/"""|'''/g)
+          if (inTripleQuote) {
+            if (triples && triples.includes(inTripleQuote)) inTripleQuote = ''
+            endIdx++
+            continue
+          }
           if (next.trim() !== '' && !next.trim().startsWith('#')) {
             const nextIndent = next.match(/^\s*/)?.[0].length ?? 0
             if (nextIndent <= indent) break
           }
+          if (triples && triples.length % 2 === 1) inTripleQuote = triples[0]
           endIdx++
         }
+        // Trailing blank lines and comments belong to whatever comes next, not to this def.
+        while (endIdx > i + 1 && (lines[endIdx - 1].trim() === '' || lines[endIdx - 1].trim().startsWith('#'))) endIdx--
+        if (decl[2] === 'class') classStack.push({ name, indent })
+        const baseQualified = isMethod ? `${owner.name}.${name}` : name
+        const seenCount = (qualifiedSeen.get(baseQualified) ?? 0) + 1
+        qualifiedSeen.set(baseQualified, seenCount)
+        const qualifiedSuffix = seenCount === 1 ? baseQualified : `${baseQualified}~${seenCount}`
         const sliceText = lines.slice(i, endIdx).join('\n')
+        for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
+          const decMatch =
+            /^\s*@(?:app|router|bp)\.(get|post|put|patch|delete|all|route)\s*\(\s*['"]([^'"]+)['"]/i.exec(
+              lines[j],
+            )
+          if (decMatch) {
+            routes.push({
+              symbolName: name,
+              direction: 'expose',
+              method: decMatch[1].toUpperCase(),
+              pathPattern: decMatch[2],
+              framework: 'python-router',
+            })
+            break
+          }
+        }
+        this.extractCallSitesFromPythonBlock(isMethod ? baseQualified : name, sliceText, edges, routes)
         symbols.push({
           name,
-          qualifiedName: `${file.relPath}#${name}`,
+          qualifiedName: `${file.relPath}#${qualifiedSuffix}`,
           kind,
           exported: !name.startsWith('_'),
+          scope: isMethod ? 'member' : 'module',
+          parent: isMethod ? owner.name : undefined,
           startLine: i + 1,
           endLine: endIdx,
           signature: line.trim(),
@@ -462,9 +485,26 @@ export class PolyglotExtractor {
     const lines = file.content.split(/\r?\n/)
     const symbols: ExtractedSymbol[] = []
     const edges: ExtractedEdge[] = []
+    const routes: ExtractedRoute[] = []
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
+      const routeMatch =
+        /\b(?:http\.HandleFunc|[a-zA-Z0-9_]+\.(?:GET|POST|PUT|PATCH|DELETE|ALL))\s*\(\s*["`]([^"`]+)["`]/i.exec(
+          line,
+        )
+      if (routeMatch) {
+        let method = 'ANY'
+        const m2 = line.match(/\.(GET|POST|PUT|PATCH|DELETE|ALL)\b/i)
+        if (m2) method = m2[1].toUpperCase()
+        routes.push({
+          symbolName: `GoRoute ${method} ${routeMatch[1]}`,
+          direction: 'expose',
+          method,
+          pathPattern: routeMatch[1],
+          framework: 'go-router',
+        })
+      }
       const fn =
         /^\s*func\s+(?:\(\s*\w+\s+\*?([A-Za-z_]\w*)\s*\)\s+)?([A-Za-z_]\w*)\s*\(([^)]*)\)/.exec(
           line,
@@ -473,7 +513,7 @@ export class PolyglotExtractor {
         const recv = fn[1]
         const name = fn[2]
         const qName = recv ? `${recv}.${name}` : name
-        const endLine = this.findBlockEnd(lines, i, 120)
+        const endLine = this.findBlockEnd(lines, i, lines.length)
         const sliceText = lines.slice(i, endLine).join('\n')
         symbols.push({
           name: qName,
@@ -488,13 +528,14 @@ export class PolyglotExtractor {
           docSummary: this.extractLeadingDoc(lines, i),
           sliceText,
         })
+        this.extractCallSitesFromGoBlock(qName, sliceText, edges, routes)
         continue
       }
 
       const typeMatch = /^\s*type\s+([A-Za-z_]\w*)\s+(struct|interface)\b/.exec(line)
       if (typeMatch) {
         const name = typeMatch[1]
-        const endLine = this.findBlockEnd(lines, i, 120)
+        const endLine = this.findBlockEnd(lines, i, lines.length)
         const sliceText = lines.slice(i, endLine).join('\n')
         symbols.push({
           name,
@@ -519,7 +560,7 @@ export class PolyglotExtractor {
       headings: symbols.map((s) => s.name).join(' '),
       symbols,
       edges,
-      routes: [],
+      routes,
     }
   }
 
@@ -534,7 +575,7 @@ export class PolyglotExtractor {
       if (prismaModel) {
         const kind: SymbolKind = prismaModel[1] === 'enum' ? 'enum' : 'model'
         const name = prismaModel[2]
-        const endLine = this.findBlockEnd(lines, i, 120)
+        const endLine = this.findBlockEnd(lines, i, lines.length)
         const sliceText = lines.slice(i, endLine).join('\n')
         symbols.push({
           name,
@@ -558,7 +599,7 @@ export class PolyglotExtractor {
         )
       if (sqlTable) {
         const name = sqlTable[1]
-        const endLine = Math.min(lines.length, i + 45)
+        const endLine = this.findSqlStatementEnd(lines, i)
         const sliceText = lines.slice(i, endLine).join('\n')
         symbols.push({
           name,
@@ -621,6 +662,15 @@ export class PolyglotExtractor {
         sliceText,
       })
     } else {
+      // Capture document-level preamble/frontmatter (e.g. Authority, Escopo, Fonte) under H1
+      const firstH2Idx = headingIndices.find((h) => h.level >= 2)?.lineIdx ?? Math.min(lines.length, 10)
+      const docPreamble = lines
+        .slice(0, Math.min(firstH2Idx, 12))
+        .map((l) => l.replace(/[#*_`]/g, '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 220)
+
       for (let h = 0; h < headingIndices.length; h++) {
         const cur = headingIndices[h]
         const nextLineIdx =
@@ -632,7 +682,12 @@ export class PolyglotExtractor {
           .map((l) => l.trim())
           .filter(Boolean)
           .join(' ')
-          .slice(0, 280)
+          .slice(0, 240)
+
+        const fullSummary =
+          cur.lineIdx > 0 && docPreamble
+            ? `[${docPreamble}] ${bodyPreview || cur.title}`.slice(0, 320)
+            : bodyPreview || cur.title
 
         symbols.push({
           name: cur.title,
@@ -644,7 +699,7 @@ export class PolyglotExtractor {
           signature: `${'#'.repeat(cur.level)} ${cur.title}`,
           bodyHash: this.hashSlice(sliceText),
           tokenEstimate: Math.max(1, Math.ceil(sliceText.length / 4)),
-          docSummary: bodyPreview || cur.title,
+          docSummary: fullSummary,
           sliceText,
         })
       }

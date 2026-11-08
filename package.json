@@ -1,6 +1,6 @@
 {
   "name": "kaxcav-vortex",
-  "version": "2.0.0",
+  "version": "3.1.0",
   "description": "Kaxcav Vortex (kvx) — High-Performance Multi-Repo Code Intelligence, CSR Graph, Submodular L0-L3 Context Engine & MCP Server",
   "type": "module",
   "author": "Kaxcav",

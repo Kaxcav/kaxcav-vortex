@@ -749,6 +749,133 @@
         display: none;
       }
     }
+
+    /* Drive Nexus Forensic Studio Styles */
+    .nexus-toolbar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--bg-rail);
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .nexus-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .nexus-subnav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .nexus-subbtn {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-panel);
+      color: var(--ink-secondary);
+      font-family: var(--font-sans);
+      font-size: 0.76rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .nexus-subbtn.active {
+      background: var(--accent-surface);
+      border-color: var(--accent-border);
+      color: var(--ink-primary);
+    }
+
+    .nexus-kpi-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-bottom: 1px solid var(--border-hairline);
+      background: var(--bg-panel);
+    }
+
+    .nexus-kpi-cell {
+      padding: 8px 12px;
+      border-right: 1px solid var(--border-hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .nexus-kpi-cell:last-child {
+      border-right: none;
+    }
+
+    .nexus-kpi-label {
+      font-size: 0.68rem;
+      color: var(--ink-muted);
+      font-weight: 600;
+    }
+
+    .nexus-kpi-val {
+      font-family: var(--font-mono);
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--ink-primary);
+    }
+
+    .auth-pill {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 600;
+      border: 1px solid var(--border-strong);
+    }
+
+    .auth-CURRENT_USER_CONFIRMED {
+      background: oklch(0.24 0.055 155);
+      border-color: oklch(0.46 0.11 155);
+      color: oklch(0.86 0.09 155);
+    }
+
+    .auth-LEGACY_OBSERVED {
+      background: oklch(0.23 0.045 42);
+      border-color: oklch(0.42 0.09 42);
+      color: oklch(0.84 0.11 42);
+    }
+
+    .auth-LEGACY_IDEA {
+      background: oklch(0.22 0.04 300);
+      border-color: oklch(0.40 0.08 300);
+      color: oklch(0.83 0.09 300);
+    }
+
+    .auth-ACTIVE_OPERATIONAL {
+      background: oklch(0.22 0.04 235);
+      border-color: oklch(0.40 0.08 235);
+      color: oklch(0.84 0.08 235);
+    }
+
+    .conflict-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border-hairline);
+    }
+
+    .conflict-card {
+      padding: 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-canvas);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
   </style>
 </head>
 <body>
@@ -771,6 +898,10 @@
         <button class="nav-tab active" data-tab="context" role="tab">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
           Context Workbench
+        </button>
+        <button class="nav-tab" data-tab="nexus" role="tab">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          Drive Nexus Vault
         </button>
         <button class="nav-tab" data-tab="topology" role="tab">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
@@ -844,14 +975,20 @@
                   <button type="button" data-fidelity="compact">compact</button>
                 </div>
                 <span>Budget:</span>
-                <input type="number" id="budgetInput" class="input-control mono" style="width: 82px; height: 26px;" value="1800" min="400" max="12000" step="200" />
+                <input type="number" id="budgetInput" class="input-control mono" style="width: 76px; height: 26px;" value="1800" min="400" max="12000" step="200" />
+                <span>Path:</span>
+                <input type="text" id="pathScopeInput" class="input-control mono" style="width: 105px; height: 26px;" placeholder="ex: current/" />
+                <span>Corpus:</span>
+                <select id="corpusScopeSelect" class="repo-select" style="height: 26px; padding: 0 6px;">
+                  <option value="all">all</option>
+                  <option value="docs">docs (.md)</option>
+                  <option value="sql">sql (.sql)</option>
+                  <option value="code">code (.ts/.js/.py)</option>
+                </select>
                 <span class="mono" id="activeEtagBadge">ETag: none</span>
               </div>
               <div class="preset-chips" id="presetChips">
                 <button type="button" class="preset-chip" data-task="SubmodularPacker CsrGraph personalizedPageRank CodeStateMachine">Core Engine &amp; Graph</button>
-                <button type="button" class="preset-chip" data-task="RepositoryShard SQLite FTS5 BM25F cas_extractions">Storage &amp; SQLite Shards</button>
-                <button type="button" class="preset-chip" data-task="MultiRepoFederator REST routes contracts symbols">Multi-Repo Federation</button>
-                <button type="button" class="preset-chip" data-task="VortexMcpServer tools context outline blast_radius">MCP Protocol &amp; Tools</button>
               </div>
             </div>
           </div>
@@ -910,6 +1047,81 @@
         <!-- TAB 4: Shards & Telemetry -->
         <div class="tab-panel" id="panel-telemetry">
           <div class="report-scroll" id="telemetryReportContainer"></div>
+        </div>
+
+        <!-- TAB 5: Drive Nexus Zero-Loss Vault -->
+        <div class="tab-panel" id="panel-nexus">
+          <div class="nexus-toolbar">
+            <div class="nexus-row">
+              <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
+                <span style="font-size: 0.75rem; font-weight: 600; color: var(--ink-secondary);">WORKSPACE:</span>
+                <select id="nexusWorkspaceSelect" class="repo-select" style="min-width: 280px;"></select>
+                <button type="button" class="btn btn-primary" id="btnActivateNexusShard" title="Carregar o Corpus Canônico deste Workspace no Context Workbench">
+                  Open in Context Workbench
+                </button>
+              </div>
+              <div class="nexus-subnav" id="nexusSubnav">
+                <button type="button" class="nexus-subbtn active" data-sub="inventory">Zero-Loss Inventory</button>
+                <button type="button" class="nexus-subbtn" data-sub="sheets">Spreadsheet &amp; Formula X-Ray</button>
+                <button type="button" class="nexus-subbtn" data-sub="conflicts">Truth &amp; Conflict Radar</button>
+                <button type="button" class="nexus-subbtn" data-sub="dlp">DLP Secret Audit &amp; B2B API</button>
+              </div>
+            </div>
+            <div class="nexus-row">
+              <div style="display: flex; align-items: center; gap: 6px; flex: 1;">
+                <input
+                  type="text"
+                  id="nexusIngestDirInput"
+                  class="input-control mono"
+                  style="max-width: 290px; height: 28px; font-size: 0.75rem;"
+                  placeholder="Pasta local ou Quarentena (ex: C:\dados\drive-exportado)"
+                />
+                <input
+                  type="text"
+                  id="nexusIngestNameInput"
+                  class="input-control"
+                  style="max-width: 170px; height: 28px; font-size: 0.75rem;"
+                  placeholder="Nome do Workspace / Cliente"
+                />
+                <button type="button" class="btn" id="btnNexusIngestLocal" style="height: 28px;">Ingest Local Vault</button>
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <input
+                  type="text"
+                  id="nexusDriveFolderInput"
+                  class="input-control mono"
+                  style="width: 240px; height: 28px; font-size: 0.75rem;"
+                  placeholder="Google Drive Folder ID ou URL compartilhada"
+                />
+                <button type="button" class="btn" id="btnNexusSyncDrive" style="height: 28px;">Sync Google Drive</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="nexus-kpi-strip">
+            <div class="nexus-kpi-cell">
+              <span class="nexus-kpi-label">RAW FILES IN VAULT</span>
+              <span class="nexus-kpi-val" id="nkpiFiles">0</span>
+            </div>
+            <div class="nexus-kpi-cell">
+              <span class="nexus-kpi-label">INDEXED BYTES</span>
+              <span class="nexus-kpi-val" id="nkpiBytes">0 KB</span>
+            </div>
+            <div class="nexus-kpi-cell">
+              <span class="nexus-kpi-label">SHEETS &amp; FORMULAS</span>
+              <span class="nexus-kpi-val" id="nkpiSheets">0 / 0</span>
+            </div>
+            <div class="nexus-kpi-cell">
+              <span class="nexus-kpi-label">DLP SECRETS REDACTED</span>
+              <span class="nexus-kpi-val" id="nkpiDlp" style="color: var(--accent);">0</span>
+            </div>
+            <div class="nexus-kpi-cell">
+              <span class="nexus-kpi-label">AUTHORITY CONFLICTS</span>
+              <span class="nexus-kpi-val" id="nkpiConflicts" style="color: var(--danger);">0</span>
+            </div>
+          </div>
+
+          <div class="report-scroll" id="nexusContentContainer"></div>
         </div>
       </section>
 
@@ -1012,6 +1224,8 @@
             runBlastRadius();
           } else if (tab === 'telemetry') {
             loadTelemetryTab();
+          } else if (tab === 'nexus') {
+            loadNexusOverview();
           }
         });
       });
@@ -1026,8 +1240,8 @@
         });
       });
 
-      // Preset Chips
-      document.querySelectorAll('.preset-chip').forEach((chip) => {
+      // Preset Chips: built-in ones + machine-local ones (~/.kvx/local.json, served by /api/presets)
+      function bindPresetChip(chip) {
         chip.addEventListener('click', async () => {
           const repo = chip.getAttribute('data-repo');
           const task = chip.getAttribute('data-task');
@@ -1041,7 +1255,24 @@
             await runContextPack(false);
           }
         });
-      });
+      }
+      document.querySelectorAll('.preset-chip').forEach(bindPresetChip);
+      fetch('/api/presets')
+        .then((r) => (r.ok ? r.json() : { presets: [] }))
+        .then((data) => {
+          const box = document.getElementById('presetChips');
+          for (const p of data.presets || []) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'preset-chip';
+            if (p.repo) b.setAttribute('data-repo', p.repo);
+            b.setAttribute('data-task', p.task || '');
+            b.textContent = p.label || p.task || 'preset';
+            box.prepend(b);
+            bindPresetChip(b);
+          }
+        })
+        .catch(() => {});
 
       elRepoSelector.addEventListener('change', async () => {
         state.activeRepo = elRepoSelector.value;
@@ -1209,11 +1440,17 @@
       async function runContextPack(useDelta) {
         const task = elTaskQueryInput.value.trim() || 'architecture overview';
         const tokenBudget = Number(elBudgetInput.value) || 1800;
+        const pathScopeEl = document.getElementById('pathScopeInput');
+        const corpusScopeEl = document.getElementById('corpusScopeSelect');
+        const pathScope = pathScopeEl && pathScopeEl.value.trim() ? pathScopeEl.value.trim() : undefined;
+        const corpusScope = corpusScopeEl && corpusScopeEl.value !== 'all' ? corpusScopeEl.value : undefined;
         const payload = {
           repositoryPath: state.activeRepo,
           task,
           tokenBudget,
           fidelity: state.fidelity,
+          path: pathScope,
+          corpus: corpusScope,
           includeFederation: true,
           deltaFrom: useDelta && state.lastEtag ? state.lastEtag : undefined
         };
@@ -1635,6 +1872,356 @@
           drawTopology();
         }
       });
+
+      // Drive Nexus Zero-Loss Vault Controllers
+      let nexusState = {
+        activeWorkspaceId: '',
+        subTab: 'inventory',
+        overview: null,
+        selectedSheetId: null
+      };
+
+      const elNexusWorkspaceSelect = document.getElementById('nexusWorkspaceSelect');
+      const elNexusContentContainer = document.getElementById('nexusContentContainer');
+
+      document.querySelectorAll('#nexusSubnav .nexus-subbtn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#nexusSubnav .nexus-subbtn').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          nexusState.subTab = btn.getAttribute('data-sub') || 'inventory';
+          renderNexusSubTab();
+        });
+      });
+
+      if (elNexusWorkspaceSelect) {
+        elNexusWorkspaceSelect.addEventListener('change', () => {
+          nexusState.activeWorkspaceId = elNexusWorkspaceSelect.value;
+          nexusState.selectedSheetId = null;
+          loadNexusOverview(nexusState.activeWorkspaceId);
+        });
+      }
+
+      const btnActivateNexusShard = document.getElementById('btnActivateNexusShard');
+      if (btnActivateNexusShard) {
+        btnActivateNexusShard.addEventListener('click', async () => {
+          const ws = nexusState.overview && nexusState.overview.activeWorkspace;
+          if (!ws || !ws.canonicalDir) return;
+          state.activeRepo = ws.canonicalDir;
+          await refreshStatusFooter(true);
+          elRepoSelector.value = ws.canonicalDir;
+          await loadRepoTopology();
+          document.querySelector('.nav-tab[data-tab="context"]').click();
+          await runContextPack(false);
+        });
+      }
+
+      const btnNexusIngestLocal = document.getElementById('btnNexusIngestLocal');
+      if (btnNexusIngestLocal) {
+        btnNexusIngestLocal.addEventListener('click', async () => {
+          const dirInput = document.getElementById('nexusIngestDirInput');
+          const nameInput = document.getElementById('nexusIngestNameInput');
+          const sourceDir = (dirInput.value || '').trim();
+          const name = (nameInput.value || '').trim() || sourceDir.split('\\').pop() || 'Drive Vault';
+          if (!sourceDir) return;
+          btnNexusIngestLocal.textContent = 'Ingesting...';
+          const res = await apiPost('/api/nexus/ingest', { sourceDir, name });
+          btnNexusIngestLocal.textContent = 'Ingest Local Vault';
+          if (res && res.workspace) {
+            dirInput.value = '';
+            nameInput.value = '';
+            nexusState.activeWorkspaceId = res.workspace.workspaceId;
+            await refreshStatusFooter(true);
+            await loadNexusOverview(nexusState.activeWorkspaceId);
+          }
+        });
+      }
+
+      const btnNexusSyncDrive = document.getElementById('btnNexusSyncDrive');
+      if (btnNexusSyncDrive) {
+        btnNexusSyncDrive.addEventListener('click', async () => {
+          const folderInput = document.getElementById('nexusDriveFolderInput');
+          const nameInput = document.getElementById('nexusIngestNameInput');
+          const folderIdOrUrl = (folderInput.value || '').trim();
+          if (!folderIdOrUrl) return;
+          const name = (nameInput.value || '').trim() || 'Google Drive Sync';
+          btnNexusSyncDrive.textContent = 'Syncing Drive...';
+          const res = await apiPost('/api/nexus/drive-sync', { folderIdOrUrl, name });
+          btnNexusSyncDrive.textContent = 'Sync Google Drive';
+          if (res && res.ingestion && res.ingestion.workspace) {
+            folderInput.value = '';
+            nexusState.activeWorkspaceId = res.ingestion.workspace.workspaceId;
+            await refreshStatusFooter(true);
+            await loadNexusOverview(nexusState.activeWorkspaceId);
+          }
+        });
+      }
+
+      async function loadNexusOverview(wsId) {
+        const query = wsId ? '?workspaceId=' + encodeURIComponent(wsId) : '';
+        const data = await apiGet('/api/nexus/overview' + query);
+        if (!data) return;
+        nexusState.overview = data;
+
+        const workspaces = data.workspaces || [];
+        const activeWs = data.activeWorkspace;
+        if (activeWs) {
+          nexusState.activeWorkspaceId = activeWs.workspaceId;
+        }
+
+        if (elNexusWorkspaceSelect) {
+          elNexusWorkspaceSelect.innerHTML = workspaces
+            .map(
+              (w) =>
+                '<option value="' +
+                escapeHtml(w.workspaceId) +
+                '"' +
+                (w.workspaceId === nexusState.activeWorkspaceId ? ' selected' : '') +
+                '>' +
+                escapeHtml(w.name) +
+                ' (' +
+                w.totalRawFiles +
+                ' files, ' +
+                w.totalSheets +
+                ' sheets)</option>'
+            )
+            .join('');
+        }
+
+        document.getElementById('nkpiFiles').textContent = activeWs ? activeWs.totalRawFiles.toLocaleString('pt-BR') : '0';
+        document.getElementById('nkpiBytes').textContent = activeWs
+          ? (activeWs.totalBytes / 1024).toFixed(1) + ' KB'
+          : '0 KB';
+        document.getElementById('nkpiSheets').textContent = activeWs
+          ? activeWs.totalSheets + ' / ' + activeWs.totalFormulas
+          : '0 / 0';
+        document.getElementById('nkpiDlp').textContent = activeWs
+          ? activeWs.totalDlpFindings.toLocaleString('pt-BR')
+          : '0';
+        document.getElementById('nkpiConflicts').textContent = activeWs
+          ? activeWs.totalConflicts.toLocaleString('pt-BR')
+          : '0';
+
+        renderNexusSubTab();
+      }
+
+      function renderNexusSubTab() {
+        const data = nexusState.overview;
+        if (!data || !elNexusContentContainer) return;
+        const sub = nexusState.subTab;
+
+        if (sub === 'inventory') {
+          const files = data.files || [];
+          const rowsHtml = files
+            .map((f) => {
+              const kb = (f.byteSize / 1024).toFixed(1) + ' KB';
+              const driveBtn = f.driveWebLink
+                ? ' <a href="' + escapeHtml(f.driveWebLink) + '" target="_blank" rel="noopener" class="mono" style="color: var(--accent); text-decoration: none;">[Drive]</a>'
+                : '';
+              return (
+                '<tr>' +
+                  '<td class="mono">' + escapeHtml(f.relPath) + driveBtn + '</td>' +
+                  '<td><span class="auth-pill auth-' + escapeHtml(f.authorityTier) + '">' + escapeHtml(f.authorityTier) + '</span></td>' +
+                  '<td class="mono">' + kb + '</td>' +
+                  '<td class="mono">' + escapeHtml(f.sha256.slice(0, 12)) + '</td>' +
+                  '<td class="mono">' + escapeHtml(f.extractionStatus) + '</td>' +
+                  '<td class="mono">' + f.sheetCount + 's / ' + f.formulaCount + 'f / ' + f.dlpFindingsCount + ' dlp</td>' +
+                  '<td style="color: var(--ink-secondary); font-size: 0.75rem;">' + escapeHtml(f.summary) + '</td>' +
+                '</tr>'
+              );
+            })
+            .join('');
+
+          elNexusContentContainer.innerHTML =
+            '<div class="panel-box">' +
+              '<div class="panel-box-header">' +
+                '<span>ZERO-LOSS FILE LEDGER (' + files.length + ' ARTIFACTS CATALOGED WITH SHA-256)</span>' +
+                '<span class="mono">Canonical Dir: ' + escapeHtml(data.activeWorkspace ? data.activeWorkspace.canonicalDir : '') + '</span>' +
+              '</div>' +
+              '<table class="data-table">' +
+                '<thead><tr><th>Original Path</th><th>Authority Tier</th><th>Size</th><th>SHA-256</th><th>Pipeline Status</th><th>Sheets/Formulas/DLP</th><th>Structural Summary</th></tr></thead>' +
+                '<tbody>' + rowsHtml + '</tbody>' +
+              '</table>' +
+            '</div>';
+          return;
+        }
+
+        if (sub === 'sheets') {
+          const sheets = data.spreadsheets || [];
+          const sheetRows = sheets
+            .map((s) => {
+              const hdrPreview = (s.headers || []).slice(0, 10).join(', ');
+              const fPreview = (s.sampleFormulas || []).slice(0, 2).map((f) => f.cell + ': ' + f.formula).join(' | ');
+              return (
+                '<tr class="sheet-row-item" data-sheet-id="' + s.sheetId + '" style="cursor: pointer;">' +
+                  '<td class="mono" style="color: var(--accent);">' + escapeHtml(s.workbookPath) + '</td>' +
+                  '<td class="mono"><strong>' + escapeHtml(s.sheetTitle) + '</strong> (' + escapeHtml(s.state) + ')</td>' +
+                  '<td class="mono">' + s.rowCount + ' x ' + s.colCount + '</td>' +
+                  '<td class="mono">' + s.formulaCount + '</td>' +
+                  '<td class="mono">' + s.validationCount + '</td>' +
+                  '<td class="mono" style="font-size: 0.72rem; color: var(--ink-secondary);">' + escapeHtml(hdrPreview || 'sem_cabecalho') + '</td>' +
+                  '<td class="mono" style="font-size: 0.72rem; color: var(--ink-muted);">' + escapeHtml(fPreview) + '</td>' +
+                '</tr>'
+              );
+            })
+            .join('');
+
+          elNexusContentContainer.innerHTML =
+            '<div id="sheetDetailBox"></div>' +
+            '<div class="panel-box">' +
+              '<div class="panel-box-header">' +
+                '<span>SPREADSHEET &amp; FORMULA CATALOG (' + sheets.length + ' SHEETS INDEXED)</span>' +
+                '<span class="mono">Clique em qualquer aba para inspecionar todas as colunas, fórmulas e linhas</span>' +
+              '</div>' +
+              '<table class="data-table">' +
+                '<thead><tr><th>Workbook</th><th>Sheet Title</th><th>Dimensions</th><th>Formulas</th><th>Validations</th><th>Columns Preview</th><th>Sample Formulas</th></tr></thead>' +
+                '<tbody>' + sheetRows + '</tbody>' +
+              '</table>' +
+            '</div>';
+
+          elNexusContentContainer.querySelectorAll('.sheet-row-item').forEach((tr) => {
+            tr.addEventListener('click', async () => {
+              const sid = Number(tr.getAttribute('data-sheet-id'));
+              const detailRes = await apiGet(
+                '/api/nexus/sheet?workspaceId=' + encodeURIComponent(nexusState.activeWorkspaceId) + '&sheetId=' + sid
+              );
+              if (!detailRes || !detailRes.sheetData) return;
+              const sd = detailRes.sheetData;
+              const allHeadersHtml = sd.headers.map((h) => '<span class="version-tag">' + escapeHtml(h) + '</span>').join(' ');
+              const allFormulasHtml = sd.formulas
+                .map((f) => '<div class="mono" style="font-size: 0.73rem; padding: 2px 0;"><strong>' + escapeHtml(f.cell) + '</strong>: ' + escapeHtml(f.formula) + '</div>')
+                .join('') || '<div style="color: var(--ink-muted)">Sem fórmulas registradas nesta aba.</div>';
+
+              const detailEl = document.getElementById('sheetDetailBox');
+              if (detailEl) {
+                detailEl.innerHTML =
+                  '<div class="panel-box" style="margin-bottom: 12px; border-color: var(--accent-border);">' +
+                    '<div class="panel-box-header">' +
+                      '<span>INSPECTING SHEET: ' + escapeHtml(sd.workbookPath + ' :: ' + sd.sheetTitle) + '</span>' +
+                      '<span class="mono">' + sd.rowCount + ' rows x ' + sd.colCount + ' cols</span>' +
+                    '</div>' +
+                    '<div style="padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">' +
+                      '<div style="font-size: 0.75rem; font-weight: 600; color: var(--ink-secondary);">COLUMNS (' + sd.headers.length + '):</div>' +
+                      '<div style="display: flex; flex-wrap: wrap; gap: 4px;">' + allHeadersHtml + '</div>' +
+                      '<div style="font-size: 0.75rem; font-weight: 600; color: var(--ink-secondary); margin-top: 6px;">EXTRACTED FORMULAS:</div>' +
+                      allFormulasHtml +
+                    '</div>' +
+                  '</div>';
+              }
+            });
+          });
+          return;
+        }
+
+        if (sub === 'conflicts') {
+          const conflicts = data.conflicts || [];
+          const itemsHtml = conflicts
+            .map((c) => {
+              return (
+                '<div class="panel-box">' +
+                  '<div class="panel-box-header">' +
+                    '<span>CONFLICT #' + c.conflictId + ': ' + escapeHtml(c.topic) + '</span>' +
+                    '<span class="mono" style="color: var(--danger);">SEVERITY: ' + escapeHtml(c.severity.toUpperCase()) + ' | ' + escapeHtml(c.status) + '</span>' +
+                  '</div>' +
+                  '<div class="conflict-pair">' +
+                    '<div class="conflict-card">' +
+                      '<div style="display: flex; justify-content: space-between; align-items: center;">' +
+                        '<span class="auth-pill auth-CURRENT_USER_CONFIRMED">CURRENT_USER_CONFIRMED (1.45x Boost)</span>' +
+                        '<span class="mono" style="font-size: 0.72rem; color: var(--ink-secondary);">' + escapeHtml(c.currentFile) + '</span>' +
+                      '</div>' +
+                      '<div style="font-size: 0.81rem; color: var(--ink-primary);">' + escapeHtml(c.currentRuleExcerpt) + '</div>' +
+                    '</div>' +
+                    '<div class="conflict-card">' +
+                      '<div style="display: flex; justify-content: space-between; align-items: center;">' +
+                        '<span class="auth-pill auth-LEGACY_OBSERVED">LEGACY_OBSERVED (0.85x Dampened)</span>' +
+                        '<span class="mono" style="font-size: 0.72rem; color: var(--ink-secondary);">' + escapeHtml(c.legacyFile) + '</span>' +
+                      '</div>' +
+                      '<div style="font-size: 0.81rem; color: var(--ink-secondary);">' + escapeHtml(c.legacyRuleExcerpt) + '</div>' +
+                    '</div>' +
+                  '</div>' +
+                '</div>'
+              );
+            })
+            .join('') || '<div class="panel-box" style="padding: 14px;">Nenhum conflito entre regras vigentes e documentos legados detectado neste workspace.</div>';
+
+          elNexusContentContainer.innerHTML = itemsHtml;
+          return;
+        }
+
+        if (sub === 'dlp') {
+          const dlp = data.dlpFindings || [];
+          const keys = data.apiKeys || [];
+
+          const keyRows = keys
+            .map(
+              (k) =>
+                '<tr>' +
+                  '<td class="mono">' + escapeHtml(k.keyId) + '</td>' +
+                  '<td>' + escapeHtml(k.tenantName) + '</td>' +
+                  '<td class="mono" style="color: var(--accent);">' + escapeHtml(k.keyPrefix) + '</td>' +
+                  '<td class="mono">' + escapeHtml(k.planTier) + '</td>' +
+                  '<td class="mono">' + k.usedQueries + ' / ' + k.monthlyQuota.toLocaleString('pt-BR') + '</td>' +
+                  '<td class="mono">' + escapeHtml(k.createdAt.slice(0, 19)) + '</td>' +
+                '</tr>'
+            )
+            .join('');
+
+          const dlpRows = dlp
+            .map(
+              (d) =>
+                '<tr>' +
+                  '<td class="mono">' + escapeHtml(d.relPath) + ':L' + d.lineNumber + '</td>' +
+                  '<td class="mono">' + escapeHtml(d.category) + '</td>' +
+                  '<td class="mono" style="color: var(--danger);">' + escapeHtml(d.severity.toUpperCase()) + '</td>' +
+                  '<td class="mono">' + escapeHtml(d.redactedToken) + '</td>' +
+                  '<td class="mono">sha256:' + escapeHtml(d.secretFingerprint) + '</td>' +
+                  '<td class="mono" style="font-size: 0.72rem; color: var(--ink-secondary);">' + escapeHtml(d.contextPreview) + '</td>' +
+                '</tr>'
+            )
+            .join('') || '<tr><td colspan="6" style="color: var(--ink-muted)">Nenhuma chave ou credencial exposta encontrada neste workspace.</td></tr>';
+
+          elNexusContentContainer.innerHTML =
+            '<div class="panel-box">' +
+              '<div class="panel-box-header">' +
+                '<span>COMMERCIAL B2B MULTI-TENANT API KEYS</span>' +
+                '<button type="button" class="btn btn-primary" id="btnCreateTenantKey" style="height: 24px; font-size: 0.72rem;">+ Provision New B2B API Key</button>' +
+              '</div>' +
+              '<div id="newApiKeyBanner" style="display: none; padding: 10px 12px; background: var(--accent-surface); border-bottom: 1px solid var(--accent-border); font-family: var(--font-mono); font-size: 0.78rem;"></div>' +
+              '<table class="data-table">' +
+                '<thead><tr><th>Key ID</th><th>Tenant / Client</th><th>Key Prefix</th><th>Plan Tier</th><th>Monthly Quota</th><th>Created</th></tr></thead>' +
+                '<tbody>' + keyRows + '</tbody>' +
+              '</table>' +
+            '</div>' +
+            '<div class="panel-box">' +
+              '<div class="panel-box-header">' +
+                '<span>FORENSIC DLP &amp; SECRET REDACTION LEDGER (' + dlp.length + ' SECRETS NEUTRALIZED)</span>' +
+              '</div>' +
+              '<table class="data-table">' +
+                '<thead><tr><th>File &amp; Line</th><th>Category</th><th>Severity</th><th>Replacement Token</th><th>Vault Fingerprint</th><th>Redacted Context</th></tr></thead>' +
+                '<tbody>' + dlpRows + '</tbody>' +
+              '</table>' +
+            '</div>';
+
+          const btnCreateKey = document.getElementById('btnCreateTenantKey');
+          if (btnCreateKey) {
+            btnCreateKey.addEventListener('click', async () => {
+              const res = await apiPost('/api/nexus/api-keys', {
+                workspaceId: nexusState.activeWorkspaceId,
+                tenantName: data.activeWorkspace ? data.activeWorkspace.name : 'Enterprise Client',
+                planTier: 'ENTERPRISE_UNLIMITED',
+                monthlyQuota: 500000
+              });
+              if (res && res.created) {
+                await loadNexusOverview(nexusState.activeWorkspaceId);
+                const banner = document.getElementById('newApiKeyBanner');
+                if (banner) {
+                  banner.style.display = 'block';
+                  banner.textContent = 'Chave B2B provisionada (copie agora): ' + res.created.rawApiKey;
+                }
+              }
+            });
+          }
+        }
+      }
 
       // Boot sequence
       (async function init() {

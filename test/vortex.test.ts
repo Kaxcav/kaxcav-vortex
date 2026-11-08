@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { KaxcavVortexEngine } from '../src/engine.ts'
+import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../src/engine.ts'
 import { VortexMcpServer } from '../src/mcp/server.ts'
 import { VortexDashboardServer } from '../src/ui/server.ts'
 
@@ -282,10 +282,185 @@ test('VortexDashboardServer serves anti-slop Workbench UI and live API endpoints
     const statusRes = await fetch(`${serverInfo.url}/api/status`)
     assert.equal(statusRes.status, 200)
     const statusJson = (await statusRes.json()) as { status: { version: string } }
-    assert.equal(statusJson.status.version, '2.0.0-apex')
+    assert.equal(statusJson.status.version, KAXCAV_VORTEX_VERSION)
   } finally {
     serverInfo.close()
     engine.close()
+    try { rmSync(storage, { recursive: true, force: true }) } catch {}
+  }
+})
+
+test('Authority Tier Multiplier (current/ vs legacy-*) and Scoped Path/Corpus Filtering', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kvx-auth-'))
+  const storage = mkdtempSync(join(tmpdir(), 'kvx-store5-'))
+
+  try {
+    mkdirSync(join(root, 'current'), { recursive: true })
+    mkdirSync(join(root, 'legacy-docs'), { recursive: true })
+
+    writeFileSync(
+      join(root, 'current', 'decisoes-vigentes.md'),
+      [
+        '# Decisoes Vigentes do CRM',
+        'Authority: CURRENT_USER_CONFIRMED',
+        '',
+        '## Entrada por SDR e Conversao Comercial',
+        'Lead entra pelo SDR, passa por validacao e vira Oportunidade no Comercial.',
+      ].join('\n'),
+    )
+
+    writeFileSync(
+      join(root, 'legacy-docs', 'fluxos-legado.md'),
+      [
+        '# Fluxos Legados',
+        'Authority: LEGACY_IDEA',
+        '',
+        '## Entrada por SDR e Conversao Comercial',
+        'Lead entra pelo SDR, passa por validacao e vira Oportunidade no Comercial.',
+      ].join('\n'),
+    )
+
+    writeFileSync(
+      join(root, 'legacy-docs', 'campos-crm.sql'),
+      'CREATE TABLE oportunidades (\n  id INT PRIMARY KEY,\n  lead_id INT,\n  status_comercial VARCHAR(60)\n);\n',
+    )
+
+    const engine = new KaxcavVortexEngine(storage)
+    const unscopedHits = engine.search(root, 'Lead validacao Comercial Oportunidade SDR', 10)
+    assert.ok(unscopedHits.length >= 2)
+    assert.equal(
+      unscopedHits[0].relPath,
+      'current/decisoes-vigentes.md',
+      'Authority multiplier must rank current/ above identical legacy-docs/ content',
+    )
+
+    const scopedLegacyHits = engine.search(root, 'Lead validacao Comercial Oportunidade SDR', {
+      limit: 10,
+      path: 'legacy-docs',
+    })
+    assert.ok(scopedLegacyHits.length >= 1)
+    assert.ok(
+      scopedLegacyHits.every((h) => h.relPath.startsWith('legacy-docs/')),
+      'Path filter must restrict search results to legacy-docs/',
+    )
+
+    const scopedSqlHits = engine.search(root, 'oportunidades status_comercial', {
+      limit: 10,
+      corpus: 'sql',
+    })
+    assert.equal(scopedSqlHits.length, 1)
+    assert.equal(scopedSqlHits[0].relPath, 'legacy-docs/campos-crm.sql')
+
+    const scopedPack = engine.context({
+      repositoryPath: root,
+      task: 'Lead validacao Comercial Oportunidade SDR',
+      path: 'current/',
+      corpus: 'docs',
+      tokenBudget: 800,
+    })
+    assert.equal(scopedPack.files.length, 1)
+    assert.equal(scopedPack.files[0].path, 'current/decisoes-vigentes.md')
+
+    engine.close()
+  } finally {
+    try { rmSync(root, { recursive: true, force: true }) } catch {}
+    try { rmSync(storage, { recursive: true, force: true }) } catch {}
+  }
+})
+
+test('DriveNexusVault: Zero-Loss Ingestion, AppsScript Unpacking, DLP Secret Vault, Sheet Query & Conflict Radar', () => {
+  const rawVault = mkdtempSync(join(tmpdir(), 'kvx-nexus-raw-'))
+  const storage = mkdtempSync(join(tmpdir(), 'kvx-nexus-store-'))
+
+  try {
+    mkdirSync(join(rawVault, 'current'), { recursive: true })
+    mkdirSync(join(rawVault, 'quarentena'), { recursive: true })
+
+    // 1. Current Confirmed Rule
+    writeFileSync(
+      join(rawVault, 'current', 'decisoes-vigentes.md'),
+      [
+        '# Regras Atuais do CRM',
+        'Authority: CURRENT_USER_CONFIRMED',
+        'Validado pelo Comercial: somente nesse momento a Oportunidade é criada. O SDR não cria a Oportunidade diretamente.',
+        'Licitação já inicia como Oportunidade.',
+        'Toda Oportunidade exige: NEW_LOGO, RENEWAL, AMENDMENT ou ADDITIONAL_LICENSES.',
+      ].join('\n'),
+    )
+
+    // 2. Legacy Observed Document with conflicting rules
+    writeFileSync(
+      join(rawVault, 'quarentena', 'reuniao-legada.md'),
+      [
+        '# Ata de Reuniao Legada',
+        'Authority: LEGACY_OBSERVED',
+        'Descreve criação automática de Conta e Oportunidade ao qualificar Lead na aba preVenda.',
+        'Campos livres tipo_contrato e plano_contrato na planilha Contrata.gov.',
+      ].join('\n'),
+    )
+
+    // 3. Google Apps Script JSON dump with raw leaked secrets
+    writeFileSync(
+      join(rawVault, 'quarentena', 'Comercial.json'),
+      JSON.stringify({
+        files: [
+          {
+            name: 'api-appsheet',
+            type: 'server_js',
+            source: [
+              "const TEMPLATE_ID = '1pFlIfGrnt3OLKc5-am9VENacsUcmKC67';",
+              "const APP_KEY = 'V2-9kLmP-4xQzR-8vBnW-1aSdF';",
+              "const GEMINI_KEY = '" + 'AI' + 'za' + 'SyD9876543210abcdefghijklmnopqrstuvwx' + "';",
+              "function syncAppSheet() { return 'https://api.appsheet.com/api/v2/apps/12345678-1234-1234-1234-123456789abc/tables'; }",
+            ].join('\n'),
+          },
+        ],
+      }),
+    )
+
+    // 4. CSV Spreadsheet
+    writeFileSync(
+      join(rawVault, 'quarentena', 'preVenda.csv'),
+      'id,nomeCliente,statusProposta,valor\n1,Prefeitura Municipal,Aprovada,185000\n2,Secretaria Estadual,Em analise tecnica,92000\n',
+    )
+
+    // 5. Binary artifact (must be cataloged in manifest, never lost)
+    writeFileSync(join(rawVault, 'quarentena', 'gravacao-meet.mp4'), Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]))
+
+    const engine = new KaxcavVortexEngine(storage)
+    const ingestRes = engine.nexus.ingestDirectory({
+      name: 'Enterprise Audit Vault',
+      sourceDir: rawVault,
+      tenantSlug: 'gov-audit',
+    })
+
+    assert.equal(ingestRes.workspace.totalRawFiles, 5, 'All 5 raw files (including binary mp4) must be cataloged')
+    assert.ok(ingestRes.workspace.totalDlpFindings >= 4, 'Must detect and redact AppSheet key, App ID, Google API key, and Drive Resource ID')
+    assert.ok(ingestRes.workspace.totalConflicts >= 2, 'Must detect conflicts between CURRENT_USER_CONFIRMED and LEGACY_OBSERVED')
+
+    const dlpList = engine.nexus.listDlpFindings(ingestRes.workspace.workspaceId)
+    assert.ok(dlpList.some((d) => d.category === 'appsheet_access_key' && d.redactedToken === 'V2-REDACTED'))
+    assert.ok(dlpList.some((d) => d.category === 'google_api_key' && d.redactedToken === 'GOOGLE_API_KEY_REDACTED'))
+
+    const sheetRes = engine.nexus.querySheetRows({
+      workspaceId: ingestRes.workspace.workspaceId,
+      sheetTitle: 'preVenda',
+      columnFilter: 'Aprovada',
+    })
+    assert.ok(sheetRes)
+    assert.equal(sheetRes.matchingRows.length, 1)
+    assert.equal(sheetRes.matchingRows[0].nomeCliente, 'Prefeitura Municipal')
+
+    const apiKey = engine.nexus.createTenantApiKey({
+      workspaceId: ingestRes.workspace.workspaceId,
+      tenantName: 'Org Gov BR',
+      planTier: 'GOV_AUDIT',
+    })
+    assert.ok(apiKey.rawApiKey.startsWith('vk_live_'))
+
+    engine.close()
+  } finally {
+    try { rmSync(rawVault, { recursive: true, force: true }) } catch {}
     try { rmSync(storage, { recursive: true, force: true }) } catch {}
   }
 })

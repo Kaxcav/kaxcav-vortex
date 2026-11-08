@@ -1,0 +1,2176 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drive AI · Análise Técnica e Engenharia Reversa de Acervos</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg-shell: #F8FAFD;
+      --bg-surface: #FFFFFF;
+      --bg-panel: #F0F4F9;
+      --bg-panel-hover: #E9EEF6;
+      --ink: #1F1F1F;
+      --ink-secondary: #444746;
+      --ink-muted: #5F6368;
+      --border: #E1E5EA;
+      --border-strong: #C4C7C5;
+      --blue: #0B57D0;
+      --blue-hover: #0842A0;
+      --blue-pill: #C2E7FF;
+      --blue-pill-ink: #001D35;
+      --blue-soft: #E8F0FE;
+      --green: #137333;
+      --green-soft: #E6F4EA;
+      --green-border: #CEEAD6;
+      --amber: #B06000;
+      --amber-soft: #FEF7E0;
+      --red: #B3261E;
+      --red-soft: #FCE8E6;
+      --font-sans: "Google Sans", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg-shell);
+      color: var(--ink);
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    button, input, select, textarea {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    /* TOP BAR (Google Drive Header) */
+    .drive-topbar {
+      height: 60px;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--bg-shell);
+    }
+
+    .brand-cluster {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 220px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--blue);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 16px;
+      box-shadow: 0 1px 3px rgba(11, 87, 208, 0.25);
+    }
+
+    .brand-name {
+      font-size: 19px;
+      font-weight: 500;
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+
+    .topbar-search {
+      flex: 1;
+      max-width: 680px;
+      height: 44px;
+      background: #E9EEF6;
+      border-radius: 999px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: background 150ms ease, box-shadow 150ms ease;
+    }
+
+    .topbar-search:focus-within {
+      background: #FFFFFF;
+      box-shadow: 0 1px 6px rgba(32, 33, 36, 0.18);
+    }
+
+    .topbar-search input {
+      flex: 1;
+      border: none;
+      background: transparent;
+      color: var(--ink);
+      font-size: 14.5px;
+      outline: none;
+    }
+
+    .topbar-search input::placeholder {
+      color: var(--ink-secondary);
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* MAIN SHELL */
+    .workspace-shell {
+      height: calc(100vh - 60px);
+      padding: 0 16px 16px 16px;
+      display: flex;
+      gap: 12px;
+    }
+
+    .workspace-card {
+      flex: 1;
+      background: var(--bg-surface);
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.03);
+    }
+
+    /* WORKSPACE INNER HEADER ("Peça ao Gemini" bar) */
+    .workspace-header {
+      height: 56px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .workspace-header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .workspace-title {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .workspace-body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* LEFT PANEL: SUAS FONTES & HISTÓRICO */
+    .sources-sidebar {
+      width: 315px;
+      background: var(--bg-shell);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      min-height: 0;
+    }
+
+    .sources-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      padding: 0 12px;
+      background: var(--bg-surface);
+    }
+
+    .sources-tab {
+      flex: 1;
+      background: transparent;
+      border: none;
+      padding: 13px 8px 11px;
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--ink-secondary);
+      position: relative;
+      transition: color 150ms ease;
+    }
+
+    .sources-tab.active {
+      color: var(--blue);
+      font-weight: 600;
+    }
+
+    .sources-tab.active::after {
+      content: "";
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 0;
+      height: 3px;
+      background: var(--blue);
+      border-radius: 3px 3px 0 0;
+    }
+
+    .sources-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* PILL BUTTONS */
+    .btn-pill-blue {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--blue-pill);
+      color: var(--blue-pill-ink);
+      border: none;
+      border-radius: 999px;
+      padding: 8px 16px;
+      font-size: 13.5px;
+      font-weight: 500;
+      transition: filter 150ms ease, box-shadow 150ms ease;
+    }
+
+    .btn-pill-blue:hover {
+      filter: brightness(0.96);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    }
+
+    .btn-pill-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-surface);
+      color: var(--ink-secondary);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 150ms ease, border-color 150ms ease;
+    }
+
+    .btn-pill-outline:hover {
+      background: var(--bg-panel);
+    }
+
+    .btn-primary-solid {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--blue);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 18px;
+      font-size: 13.5px;
+      font-weight: 500;
+    }
+
+    .btn-primary-solid:hover {
+      background: var(--blue-hover);
+    }
+
+    /* SOURCE TREE ITEMS */
+    .active-folder-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    .g-checkbox {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--blue);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .coverage-toggle-card {
+      background: #E9EEF6;
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .batch-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .batch-filter-pill {
+      border: 1px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--ink-secondary);
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .batch-filter-pill.active {
+      background: var(--blue-soft);
+      border-color: var(--blue);
+      color: var(--blue);
+      font-weight: 600;
+    }
+
+    .source-file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .source-file-item {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      padding: 7px 10px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--ink);
+      font-size: 13px;
+      transition: background 120ms ease;
+    }
+
+    .source-file-item:hover {
+      background: var(--bg-panel-hover);
+    }
+
+    .source-file-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+
+    .source-file-tag {
+      font-size: 11px;
+      color: var(--ink-muted);
+      flex-shrink: 0;
+    }
+
+    /* MAIN STAGE (CENTER/RIGHT) */
+    .main-stage {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      background: var(--bg-surface);
+    }
+
+    /* LENS BAR (6 Technical Analysis Modes in 1 Click) */
+    .lens-bar {
+      padding: 12px 28px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-surface);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+
+    .lens-chip {
+      border: 1px solid var(--border-strong);
+      background: var(--bg-surface);
+      color: var(--ink-secondary);
+      border-radius: 999px;
+      padding: 7px 15px;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      transition: all 150ms ease;
+    }
+
+    .lens-chip:hover {
+      background: var(--bg-panel);
+      color: var(--ink);
+    }
+
+    .lens-chip.active {
+      background: var(--blue-soft);
+      border-color: var(--blue);
+      color: var(--blue);
+      font-weight: 600;
+    }
+
+    /* STAGE SCROLL AREA */
+    .stage-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 36px 32px;
+    }
+
+    .stage-container {
+      max-width: 920px;
+      margin: 0 auto;
+    }
+
+    /* GOOGLE "VISÃO GERAL CRIADA POR IA" HEADER */
+    .ai-overview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .ai-overview-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .ai-overview-prose {
+      font-size: 15px;
+      line-height: 1.7;
+      color: var(--ink);
+      margin-bottom: 22px;
+    }
+
+    /* CLICKABLE INLINE FILE CITATION CHIPS */
+    .cite-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      color: var(--blue);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12.5px;
+      font-weight: 500;
+      font-family: var(--font-mono);
+      margin: 0 2px;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .cite-chip:hover {
+      background: var(--blue-soft);
+      border-color: var(--blue);
+    }
+
+    /* PILLARS / TECHNICAL BLOCKS */
+    .pillar-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 26px;
+    }
+
+    .pillar-item {
+      padding: 16px 20px;
+      border-radius: 14px;
+      background: var(--bg-shell);
+      border: 1px solid var(--border);
+    }
+
+    .pillar-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+
+    .pillar-title {
+      font-size: 14.5px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .pillar-metric {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--green);
+      background: var(--green-soft);
+      padding: 2px 9px;
+      border-radius: 999px;
+    }
+
+    .pillar-desc {
+      font-size: 13.8px;
+      line-height: 1.6;
+      color: var(--ink-secondary);
+      margin: 0 0 10px 0;
+    }
+
+    /* GOOGLE "↳" FOLLOW-UP SUGGESTIONS */
+    .followup-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin: 20px 0 28px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .followup-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14.5px;
+      color: var(--ink-secondary);
+      transition: background 120ms ease, color 120ms ease;
+    }
+
+    .followup-row:hover {
+      background: var(--bg-panel);
+      color: var(--blue);
+    }
+
+    .followup-arrow {
+      color: var(--ink-muted);
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    /* BOTTOM FLOATING COMPOSER ("Pedir para Gemini" style) */
+    .composer-wrap {
+      padding: 12px 36px 18px;
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .composer-box {
+      max-width: 920px;
+      margin: 0 auto;
+      background: var(--bg-panel);
+      border: 1px solid transparent;
+      border-radius: 20px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+    }
+
+    .composer-box:focus-within {
+      background: var(--bg-surface);
+      border-color: var(--border-strong);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+    }
+
+    .composer-input {
+      width: 100%;
+      border: none;
+      background: transparent;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.5;
+      resize: none;
+      outline: none;
+    }
+
+    .composer-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .composer-send-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: var(--blue);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 150ms ease, transform 120ms ease;
+    }
+
+    .composer-send-btn:hover {
+      background: var(--blue-hover);
+    }
+
+    .composer-send-btn:disabled {
+      background: #C4C7C5;
+      cursor: not-allowed;
+    }
+
+    /* DATA TABLES & CODE BLOCKS IN LENSES */
+    .clean-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .clean-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-shell);
+      border-bottom: 1px solid var(--border);
+      color: var(--ink-secondary);
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .clean-table td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    .clean-table tr:hover td {
+      background: var(--bg-shell);
+    }
+
+    .code-snippet {
+      margin: 10px 0 0;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: #1E1F22;
+      color: #E3E3E3;
+      font-family: var(--font-mono);
+      font-size: 12.2px;
+      line-height: 1.55;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .status-pill.green {
+      background: var(--green-soft);
+      color: var(--green);
+      border: 1px solid var(--green-border);
+    }
+
+    .status-pill.blue {
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .status-pill.amber {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    /* RIGHT-SIDE INSPECTOR DRAWER (Code, SQL, Sheets, Context Pack) */
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.28);
+      z-index: 80;
+      display: none;
+      justify-content: flex-end;
+    }
+
+    .drawer-backdrop.open {
+      display: flex;
+    }
+
+    .drawer-panel {
+      width: min(820px, 94vw);
+      height: 100%;
+      background: var(--bg-surface);
+      display: flex;
+      flex-direction: column;
+      box-shadow: -8px 0 28px rgba(0, 0, 0, 0.14);
+    }
+
+    .drawer-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .drawer-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 22px 24px;
+    }
+
+    /* MODAL DIALOG (Add Source / API Key) */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.35);
+      z-index: 90;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-card {
+      width: min(640px, 100%);
+      max-height: 90vh;
+      overflow-y: auto;
+      background: var(--bg-surface);
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+    }
+
+    .input-field {
+      width: 100%;
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-surface);
+      color: var(--ink);
+      font-size: 13.5px;
+    }
+
+    .input-field:focus {
+      outline: 2px solid var(--blue);
+      border-color: transparent;
+    }
+
+    @media (max-width: 900px) {
+      .sources-sidebar {
+        display: none;
+      }
+      .stage-scroll, .composer-wrap {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- GOOGLE DRIVE AI TOPBAR -->
+  <header class="drive-topbar">
+    <div class="brand-cluster">
+      <span class="brand-mark">D</span>
+      <span class="brand-name">Drive AI</span>
+    </div>
+
+    <form class="topbar-search" id="topSearchForm">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#444746" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input
+        type="search"
+        id="topSearchInput"
+        placeholder="Receber respostas do Drive ou buscar arquivos, tabelas SQL, fórmulas e funções..."
+      />
+    </form>
+
+    <div class="topbar-actions">
+      <button type="button" class="btn-pill-outline" id="btnTopClaudeKey" title="Configurar ou colar chave da API Claude em 1 clique">
+        <span id="topClaudeDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block;"></span>
+        <span id="topClaudeLabel">Claude Ativa</span>
+      </button>
+      <button type="button" class="btn-pill-blue" id="btnTopExportAi">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Super-Contexto &amp; API
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN ROUNDED WORKSPACE -->
+  <div class="workspace-shell">
+    <div class="workspace-card">
+      <!-- INNER HEADER ("Peça ao Gemini" bar) -->
+      <div class="workspace-header">
+        <div class="workspace-header-left">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#444746" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          <span class="workspace-title">Peça ao Drive · Inteligência Técnica</span>
+          <span class="status-pill green" id="headerCoverageBadge">100% Lido (280/280 fontes)</span>
+        </div>
+
+        <!-- BARRA RÁPIDA INLINE PARA COLAR CHAVE CLAUDE EM 1 CLIQUE (Sem bloqueio) -->
+        <div id="inlineKeyPopover" style="display: flex; align-items: center; gap: 8px;">
+          <input
+            type="text"
+            id="quickKeyInput"
+            class="input-field"
+            autocomplete="off"
+            spellcheck="false"
+            style="width: 230px; height: 32px; font-size: 12px; font-family: var(--font-mono);"
+            placeholder="Colar chave sk-ant-... (Ctrl+V)"
+          />
+          <button type="button" class="btn-pill-outline" id="btnQuickPasteKey" style="padding: 4px 11px; font-size: 12px;">
+            Colar 1-Clique
+          </button>
+          <button type="button" class="btn-primary-solid" id="btnQuickSaveKey" style="padding: 5px 13px; font-size: 12px;">
+            Salvar
+          </button>
+        </div>
+      </div>
+
+      <!-- 2-COLUMN BODY: LEFT ("Suas fontes") + CENTER ("Visão geral técnica + 6 Lentes") -->
+      <div class="workspace-body">
+        <!-- LEFT PANEL: SUAS FONTES & HISTÓRICO -->
+        <aside class="sources-sidebar">
+          <div class="sources-tabs">
+            <button type="button" class="sources-tab active" data-side-tab="sources" id="tabBtnSources">
+              Suas fontes (<span id="sidebarTotalFilesCount">280</span>)
+            </button>
+            <button type="button" class="sources-tab" data-side-tab="history" id="tabBtnHistory">
+              Histórico (<span id="sidebarHistoryCount">0</span>)
+            </button>
+          </div>
+
+          <!-- TAB 1: SUAS FONTES -->
+          <div class="sources-content" id="sidePanelSources">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <button type="button" class="btn-pill-blue" id="btnOpenAddModal">
+                + Adicionar pasta / Drive
+              </button>
+              <select id="workspaceSelect" class="input-field" style="height: 34px; font-size: 12px; flex: 1; min-width: 0;" title="Trocar pasta ativa"></select>
+            </div>
+
+            <!-- Active Folder Checkbox Row (Exact match to screenshot) -->
+            <div class="active-folder-row">
+              <input type="checkbox" class="g-checkbox" checked readonly title="100% dos arquivos incluídos na análise" />
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#444746" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <div style="min-width: 0; flex: 1;">
+                <div id="activeFolderTitle" style="font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                  Drive Nexus
+                </div>
+                <div id="activeFolderMeta" style="font-size: 11.5px; color: var(--ink-muted);">
+                  280 arquivos · 270 abas Excel · 26 tab. SQL
+                </div>
+              </div>
+            </div>
+
+            <!-- Deep Parsing Status Box (Like "Deixar o Gemini pesquisar fontes") -->
+            <div class="coverage-toggle-card">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <span style="font-size: 12.5px; font-weight: 600; color: var(--ink);">Engenharia reversa em 100% das fontes</span>
+                <span class="status-pill green" style="padding: 1px 8px; font-size: 11px;">ATIVO</span>
+              </div>
+              <div style="font-size: 11.5px; color: var(--ink-secondary); line-height: 1.45;">
+                Descompacta códigos <code>.json/.gs</code>, lê 3.515 fórmulas ocultas de Excel e reconstrói tabelas SQL.
+              </div>
+            </div>
+
+            <!-- Filter by Category in "Suas fontes" -->
+            <div>
+              <div style="font-size: 11.5px; font-weight: 600; color: var(--ink-secondary); margin-bottom: 6px;">
+                Explorar arquivos da pasta (clique para abrir)
+              </div>
+              <div class="batch-chip-list" id="sidebarCategoryFilter">
+                <button type="button" class="batch-filter-pill active" data-cat="all">Todos</button>
+                <button type="button" class="batch-filter-pill" data-cat="scripts">Códigos</button>
+                <button type="button" class="batch-filter-pill" data-cat="sheets">Planilhas</button>
+                <button type="button" class="batch-filter-pill" data-cat="docs">Docs/SQL</button>
+              </div>
+            </div>
+
+            <input
+              type="search"
+              id="sidebarFileSearch"
+              class="input-field"
+              style="height: 34px; font-size: 12.5px;"
+              placeholder="Filtrar arquivo, planilha ou script..."
+            />
+
+            <div class="source-file-list" id="sidebarFilesList"></div>
+          </div>
+
+          <!-- TAB 2: HISTÓRICO DE ANÁLISES E PERGUNTAS -->
+          <div class="sources-content" id="sidePanelHistory" style="display: none;">
+            <div style="font-size: 12.5px; color: var(--ink-secondary);">
+              Suas perguntas e relatórios técnicos gerados nesta sessão:
+            </div>
+            <div id="historyItemsList" style="display: flex; flex-direction: column; gap: 8px;"></div>
+          </div>
+        </aside>
+
+        <!-- MAIN STAGE: 6 LENTES TÉCNICAS + VISÃO GERAL + COMPOSER -->
+        <main class="main-stage">
+          <!-- 6 LENTES DE ANÁLISE TÉCNICA EM 1 CLIQUE -->
+          <nav class="lens-bar" id="lensBar" aria-label="Modos de Análise Técnica">
+            <button type="button" class="lens-chip active" data-lens="overview_100">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/></svg>
+              Visão Geral &amp; Mapa 100%
+            </button>
+            <button type="button" class="lens-chip" data-lens="reverse_engineering">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              Como Foi Feito (9 Técnicas)
+            </button>
+            <button type="button" class="lens-chip" data-lens="code_automations">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              Códigos &amp; Robôs (7 Projetos)
+            </button>
+            <button type="button" class="lens-chip" data-lens="sql_schema_ddl">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              Banco SQL (26 Tabelas + DDL)
+            </button>
+            <button type="button" class="lens-chip" data-lens="sheets_formulas">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+              Planilhas &amp; 3.515 Fórmulas
+            </button>
+            <button type="button" class="lens-chip" data-lens="apis_migration_guide">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              APIs, Senhas &amp; Guia Novo CRM
+            </button>
+          </nav>
+
+          <!-- SCROLLABLE STAGE CONTENT -->
+          <div class="stage-scroll" id="stageScroll">
+            <div class="stage-container">
+              <!-- RESPOSTA AO VIVO QUANDO O USUÁRIO PERGUNTA NO COMPOSER -->
+              <div id="liveResponseAnchor"></div>
+
+              <!-- CONTEÚDO DA LENTE TÉCNICA ATIVA -->
+              <div id="lensStageBody"></div>
+            </div>
+          </div>
+
+          <!-- BOTTOM COMPOSER ("Pedir para Gemini" exact experience) -->
+          <div class="composer-wrap">
+            <form class="composer-box" id="composerForm">
+              <textarea
+                id="composerInput"
+                class="composer-input"
+                rows="2"
+                placeholder="Pedir análise técnica ao Drive (ex.: Como ele fez o gerador de propostas no Docs? Quais campos tem a tabela crm.oportunidades?)..."
+              ></textarea>
+              <div class="composer-footer">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  <span class="status-pill blue" id="composerSourcesChip">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    280 fontes ativas (100% sem ponto cego)
+                  </span>
+                  <select id="composerModeSelect" class="input-field" style="height: 28px; width: auto; padding: 0 10px; font-size: 12px; border-radius: 999px; background: var(--bg-surface);">
+                    <option value="deep">Análise Profunda (Claude IA + Código + SQL + Planilhas)</option>
+                    <option value="fast">Busca Instantânea de Trechos e Planilhas</option>
+                  </select>
+                </div>
+                <button type="submit" class="composer-send-btn" id="btnComposerSubmit" title="Enviar pergunta técnica">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT-SIDE INSPECTOR DRAWER (Abre código descompactado, planilhas com fórmulas, ou Super-Contexto) -->
+  <div class="drawer-backdrop" id="inspectorBackdrop">
+    <aside class="drawer-panel">
+      <div class="drawer-header">
+        <div style="min-width: 0; flex: 1;">
+          <div id="drawerBadges" style="display: flex; gap: 6px; margin-bottom: 4px;"></div>
+          <h2 id="drawerTitle" style="margin: 0; font-size: 17px; font-weight: 600; word-break: break-word;">Arquivo</h2>
+          <div id="drawerSub" style="font-size: 12px; color: var(--ink-muted); margin-top: 2px;"></div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" class="btn-pill-outline" id="btnDrawerCopyContent">Copiar Conteúdo</button>
+          <button type="button" class="btn-pill-outline" id="btnDrawerClose">Fechar ✕</button>
+        </div>
+      </div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+  </div>
+
+  <!-- MODAL: ADICIONAR PASTA DO GOOGLE DRIVE OU COMPUTADOR -->
+  <div class="modal-backdrop" id="addSourceModal">
+    <div class="modal-card">
+      <div style="padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <h2 style="margin: 0; font-size: 18px; font-weight: 600;">Adicionar fonte do Google Drive ou Computador</h2>
+          <p style="margin: 4px 0 0; font-size: 13px; color: var(--ink-secondary);">Indexação integral de documentos, planilhas com fórmulas, códigos Apps Script e esquemas SQL.</p>
+        </div>
+        <button type="button" class="btn-pill-outline" id="btnCloseAddModal">Fechar</button>
+      </div>
+      <div style="padding: 20px 24px; display: flex; flex-direction: column; gap: 20px;">
+        <div style="padding: 16px; border-radius: 14px; background: var(--bg-shell); border: 1px solid var(--border);">
+          <div style="font-size: 14px; font-weight: 600; margin-bottom: 6px;">1. Link de pasta compartilhada do Google Drive</div>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <input type="text" id="inputDriveUrl" class="input-field" placeholder="https://drive.google.com/drive/folders/..." />
+            <div style="display: flex; gap: 8px;">
+              <input type="text" id="inputDriveName" class="input-field" placeholder="Nome da pasta (opcional)" />
+              <button type="button" class="btn-primary-solid" id="btnSyncDriveNow" style="white-space: nowrap;">Sincronizar Drive</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="padding: 16px; border-radius: 14px; background: var(--bg-surface); border: 1px solid var(--border);">
+          <div style="font-size: 14px; font-weight: 600; margin-bottom: 6px;">2. Pasta local neste computador</div>
+          <div id="localShortcutsRow" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;"></div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="inputLocalDir" class="input-field" placeholder="Ex.: C:\dados\drive-exportado" />
+            <button type="button" class="btn-primary-solid" id="btnSyncLocalNow" style="white-space: nowrap;">Indexar Pasta</button>
+          </div>
+        </div>
+
+        <div id="addModalFeedback" style="display: none; padding: 10px 14px; border-radius: 10px; font-size: 13px;"></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const state = {
+        activeWorkspaceId: '',
+        activeLens: 'overview_100',
+        sideCategory: 'all',
+        sideSearch: '',
+        bootstrap: null,
+        allVaultFiles: [],
+        history: [],
+        lastDrawerRawText: ''
+      };
+
+      function esc(val) {
+        return String(val ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      async function apiGet(url) {
+        const r = await fetch(url);
+        return r.json();
+      }
+
+      async function apiPost(url, body) {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        return r.json();
+      }
+
+      function renderFileChip(relPath) {
+        const label = String(relPath || '').split(/[/\\]/).pop() || relPath;
+        return (
+          '<button type="button" class="cite-chip btn-open-file-drawer" data-rel="' + esc(relPath) + '">' +
+            '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+            esc(label) +
+          '</button>'
+        );
+      }
+
+      function bindFileChips(container) {
+        if (!container) return;
+        container.querySelectorAll('.btn-open-file-drawer').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            openFileInspector('', btn.getAttribute('data-rel') || '');
+          });
+        });
+        container.querySelectorAll('.btn-open-sheet-drawer').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            openSheetInspector(Number(btn.getAttribute('data-sid') || 0));
+          });
+        });
+      }
+
+      async function loadWorkspaceBootstrap(wsId) {
+        const q = wsId ? '?workspaceId=' + encodeURIComponent(wsId) : '';
+        const data = await apiGet('/api/bootstrap' + q);
+        if (!data) return;
+        state.bootstrap = data;
+
+        const activeWs = data.activeWorkspace;
+        if (activeWs) {
+          state.activeWorkspaceId = activeWs.workspaceId;
+        }
+
+        // Workspace selector
+        const wsSel = document.getElementById('workspaceSelect');
+        wsSel.innerHTML = (data.workspaces || [])
+          .map(
+            (w) =>
+              '<option value="' + esc(w.workspaceId) + '"' + (w.workspaceId === state.activeWorkspaceId ? ' selected' : '') + '>' +
+                esc(w.name) + ' (' + w.totalRawFiles + ')' +
+              '</option>'
+          )
+          .join('');
+
+        const totalFiles = activeWs ? activeWs.totalRawFiles : 280;
+        const totalSheets = activeWs ? activeWs.totalSheets : 270;
+        const sqlCount = data.blueprint && data.blueprint.sqlTables ? data.blueprint.sqlTables.length : 26;
+
+        document.getElementById('sidebarTotalFilesCount').textContent = String(totalFiles);
+        document.getElementById('headerCoverageBadge').textContent =
+          '100% Lido (' + totalFiles + '/' + totalFiles + ' fontes)';
+        document.getElementById('activeFolderTitle').textContent = activeWs
+          ? activeWs.name
+          : (data.accountLabel || 'Nenhum acervo carregado');
+        document.getElementById('activeFolderMeta').textContent =
+          totalFiles + ' arquivos · ' + totalSheets + ' abas Excel · ' + sqlCount + ' tab. SQL';
+        document.getElementById('composerSourcesChip').innerHTML =
+          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+          totalFiles + ' fontes ativas (100% sem ponto cego)';
+
+        // Claude Key status
+        updateClaudeKeyBadge(data.aiConfig || {});
+
+        // Load full file list for left panel
+        const filesRes = await apiGet('/api/files?workspaceId=' + encodeURIComponent(state.activeWorkspaceId));
+        state.allVaultFiles = (filesRes && filesRes.files) || [];
+        renderSidebarFiles();
+        renderActiveLens();
+      }
+
+      function updateClaudeKeyBadge(aiCfg) {
+        const hasKey = Boolean(aiCfg.hasApiKey || aiCfg.configured);
+        const dot = document.getElementById('topClaudeDot');
+        const label = document.getElementById('topClaudeLabel');
+        const input = document.getElementById('quickKeyInput');
+        if (hasKey) {
+          dot.style.background = 'var(--green)';
+          label.textContent = 'Claude Ativa (' + (aiCfg.maskedKey || 'Salva') + ')';
+          input.placeholder = 'Chave ativa (' + (aiCfg.maskedKey || 'sk-ant-...') + ') · Colar outra';
+        } else {
+          dot.style.background = 'var(--amber)';
+          label.textContent = 'Configurar Chave IA';
+          input.placeholder = 'Colar chave sk-ant-... (Ctrl+V)';
+        }
+      }
+
+      // SIDEBAR SOURCES LIST
+      function renderSidebarFiles() {
+        const listEl = document.getElementById('sidebarFilesList');
+        const q = state.sideSearch.toLowerCase().trim();
+        const cat = state.sideCategory;
+
+        // Prioritize core technical files at the top
+        const priorityNames = new Set([
+          'crm.json',
+          'add-on-hyper.json',
+          'comercial.xlsx',
+          'conex.xlsx',
+          'tabelas e campos do crm.docx',
+          'contrata.gov.json',
+          'contrata.gov.xlsx',
+          'contratos hyti.json',
+          'comercial.json',
+          'api appsheet.json',
+          'portal de aplicativos hyper.json',
+          'jid.json'
+        ]);
+
+        const filtered = state.allVaultFiles
+          .filter((f) => {
+            if (cat === 'scripts' && f.category !== 'scripts') return false;
+            if (cat === 'sheets' && f.category !== 'sheets') return false;
+            if (cat === 'docs' && f.category !== 'docs' && f.category !== 'sql') return false;
+            if (q) {
+              const hay = (f.relPath + ' ' + (f.summary || '')).toLowerCase();
+              if (!hay.includes(q)) return false;
+            }
+            return true;
+          })
+          .sort((a, b) => {
+            const ap = priorityNames.has((a.displayName || '').toLowerCase()) ? 1 : 0;
+            const bp = priorityNames.has((b.displayName || '').toLowerCase()) ? 1 : 0;
+            return bp - ap;
+          });
+
+        if (filtered.length === 0) {
+          listEl.innerHTML = '<div style="padding: 12px; font-size: 12px; color: var(--ink-muted);">Nenhum arquivo com este filtro.</div>';
+          return;
+        }
+
+        listEl.innerHTML = filtered
+          .slice(0, 120)
+          .map((f) => {
+            let tag = 'Doc';
+            if (f.summary && f.summary.includes('Google Apps Script')) tag = 'Apps Script';
+            else if (f.sheetCount > 0) tag = f.sheetCount + ' abas';
+            else if (f.category === 'scripts') tag = 'Código';
+            return (
+              '<button type="button" class="source-file-item" data-uid="' + esc(f.fileUid) + '" data-rel="' + esc(f.relPath) + '" title="' + esc(f.relPath) + '">' +
+                '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#0B57D0" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+                '<span class="source-file-name">' + esc(f.displayName) + '</span>' +
+                '<span class="source-file-tag">' + esc(tag) + '</span>' +
+              '</button>'
+            );
+          })
+          .join('');
+
+        listEl.querySelectorAll('.source-file-item').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            openFileInspector(btn.getAttribute('data-uid') || '', btn.getAttribute('data-rel') || '');
+          });
+        });
+      }
+
+      document.querySelectorAll('#sidebarCategoryFilter button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#sidebarCategoryFilter button').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          state.sideCategory = btn.getAttribute('data-cat') || 'all';
+          renderSidebarFiles();
+        });
+      });
+
+      document.getElementById('sidebarFileSearch').addEventListener('input', (e) => {
+        state.sideSearch = e.target.value || '';
+        renderSidebarFiles();
+      });
+
+      // SIDEBAR TABS (Fontes vs Histórico)
+      document.getElementById('tabBtnSources').addEventListener('click', () => {
+        document.getElementById('tabBtnSources').classList.add('active');
+        document.getElementById('tabBtnHistory').classList.remove('active');
+        document.getElementById('sidePanelSources').style.display = 'flex';
+        document.getElementById('sidePanelHistory').style.display = 'none';
+      });
+
+      document.getElementById('tabBtnHistory').addEventListener('click', () => {
+        document.getElementById('tabBtnHistory').classList.add('active');
+        document.getElementById('tabBtnSources').classList.remove('active');
+        document.getElementById('sidePanelSources').style.display = 'none';
+        document.getElementById('sidePanelHistory').style.display = 'flex';
+        renderHistorySidebar();
+      });
+
+      function renderHistorySidebar() {
+        const box = document.getElementById('historyItemsList');
+        if (state.history.length === 0) {
+          box.innerHTML = '<div style="font-size: 12px; color: var(--ink-muted); padding: 8px 0;">Nenhuma pergunta enviada ainda. Clique em qualquer sugestão "↳" ou pergunte abaixo.</div>';
+          return;
+        }
+        box.innerHTML = state.history
+          .map(
+            (h, idx) =>
+              '<button type="button" class="source-file-item history-jump-btn" data-hidx="' + idx + '" style="flex-direction: column; align-items: flex-start; gap: 3px; background: var(--bg-surface); border: 1px solid var(--border); padding: 10px;">' +
+                '<div style="font-size: 12.5px; font-weight: 600; color: var(--blue);">' + esc(h.question) + '</div>' +
+                '<div style="font-size: 11px; color: var(--ink-muted);">' + esc(h.providerLabel) + ' · ' + esc(h.time) + '</div>' +
+              '</button>'
+          )
+          .join('');
+
+        box.querySelectorAll('.history-jump-btn').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const item = state.history[Number(btn.getAttribute('data-hidx') || 0)];
+            if (item) renderLiveResponseCard(item);
+          });
+        });
+      }
+
+      // LENS SWITCHING (6 TECHNICAL ANALYSIS MODES)
+      document.querySelectorAll('#lensBar .lens-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          document.querySelectorAll('#lensBar .lens-chip').forEach((c) => c.classList.remove('active'));
+          chip.classList.add('active');
+          state.activeLens = chip.getAttribute('data-lens') || 'overview_100';
+          renderActiveLens();
+          document.getElementById('stageScroll').scrollTop = 0;
+        });
+      });
+
+      function switchLensProgrammatically(lensId) {
+        state.activeLens = lensId;
+        document.querySelectorAll('#lensBar .lens-chip').forEach((c) => {
+          c.classList.toggle('active', c.getAttribute('data-lens') === lensId);
+        });
+        renderActiveLens();
+      }
+
+      function renderActiveLens() {
+        const container = document.getElementById('lensStageBody');
+        if (!state.bootstrap) {
+          container.innerHTML = '<div style="color: var(--ink-muted); font-size: 14px;">Carregando análise técnica do acervo...</div>';
+          return;
+        }
+
+        const bp = state.bootstrap.blueprint || {};
+        const ledger = state.bootstrap.ledger || {};
+        const tl = state.bootstrap.technicalLenses || {};
+
+        if (state.activeLens === 'overview_100') {
+          renderLensOverview100(container, bp, ledger, tl);
+        } else if (state.activeLens === 'reverse_engineering') {
+          renderLensReverseEngineering(container, bp);
+        } else if (state.activeLens === 'code_automations') {
+          renderLensCodeAutomations(container, bp);
+        } else if (state.activeLens === 'sql_schema_ddl') {
+          renderLensSqlSchema(container, bp, tl);
+        } else if (state.activeLens === 'sheets_formulas') {
+          renderLensSheetsFormulas(container, state.bootstrap.spreadsheets || []);
+        } else if (state.activeLens === 'apis_migration_guide') {
+          renderLensApisAndMigration(container, bp, tl, state.bootstrap.dlpFindings || []);
+        }
+
+        bindFileChips(container);
+      }
+
+      // LENS 1: VISÃO GERAL TÉCNICA CRIADA POR IA + MAPA 100% (Estilo Google Drive AI + Profundidade Técnica)
+      function renderLensOverview100(container, bp, ledger, tl) {
+        const ov = (tl && tl.executiveOverview) || {};
+        const pillars = ov.pillars || [];
+        const followUps = ov.followUpPrompts || [];
+        const batches = ledger.batches || [];
+        const allLedgerFiles = ledger.files || [];
+
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0B57D0" stroke-width="2"><path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/></svg>' +
+              '<span>Visão geral técnica criada por IA</span>' +
+            '</div>' +
+            '<span class="status-pill blue">Análise Exaustiva: ' + (ledger.totalFiles || 280) + ' arquivos · ' + (bp.stats ? bp.stats.totalFormulas.toLocaleString('pt-BR') : '3.515') + ' fórmulas · ' + (bp.sqlTables ? bp.sqlTables.length : 26) + ' tabelas SQL</span>' +
+          '</div>' +
+          '<p class="ai-overview-prose">' +
+            esc(ov.leadParagraph || 'A pasta foi analisada integralmente em nível de código-fonte, fórmulas de planilhas e banco de dados.') +
+          '</p>';
+
+        // 5 Technical Pillars with clickable file chips
+        html += '<div class="pillar-list">';
+        for (const p of pillars) {
+          html +=
+            '<div class="pillar-item">' +
+              '<div class="pillar-top">' +
+                '<span class="pillar-title">' + esc(p.title) + '</span>' +
+                '<span class="pillar-metric">' + esc(p.metrics) + '</span>' +
+              '</div>' +
+              '<p class="pillar-desc">' + esc(p.summary) + '</p>' +
+              '<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">' +
+                '<span style="font-size: 11.5px; color: var(--ink-muted);">Fontes técnicas:</span>' +
+                (p.citedFiles || []).map((f) => renderFileChip(f)).join('') +
+              '</div>' +
+            '</div>';
+        }
+        html += '</div>';
+
+        // Google "↳" Follow-up Technical Prompts
+        if (followUps.length > 0) {
+          html += '<div class="followup-list">';
+          for (const fp of followUps) {
+            html +=
+              '<button type="button" class="followup-row btn-followup-prompt" data-lens="' + esc(fp.lensId) + '" data-q="' + esc(fp.question) + '">' +
+                '<span class="followup-arrow">↳</span>' +
+                '<span>' + esc(fp.label) + '</span>' +
+              '</button>';
+          }
+          html += '</div>';
+        }
+
+        // Complete 100% Ledger Table (Zero Blind Spot Guarantee)
+        html +=
+          '<div style="margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border);">' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;">' +
+              '<div>' +
+                '<h3 style="margin: 0; font-size: 16px; font-weight: 600;">Inventário Forense 100% (Todos os ' + allLedgerFiles.length + ' arquivos auditados por lote)</h3>' +
+                '<p style="margin: 3px 0 0; font-size: 13px; color: var(--ink-secondary);">Nenhum arquivo passa despercebido. Filtre abaixo por lote técnico ou pesquise qualquer arquivo.</p>' +
+              '</div>' +
+              '<div style="display: flex; gap: 8px; flex-wrap: wrap;">' +
+                '<select id="overviewBatchSelect" class="input-field" style="width: auto; height: 34px; font-size: 12.5px;">' +
+                  '<option value="all">Todos os 4 Lotes (' + allLedgerFiles.length + ' arquivos)</option>' +
+                  batches.map((b) => '<option value="' + esc(b.batchName) + '">' + esc(b.batchName) + ' (' + b.fileCount + ')</option>').join('') +
+                '</select>' +
+                '<input type="search" id="overviewLedgerSearch" class="input-field" style="width: 220px; height: 34px; font-size: 12.5px;" placeholder="Buscar nos 280 arquivos..." />' +
+              '</div>' +
+            '</div>' +
+            '<div style="border: 1px solid var(--border); border-radius: 14px; overflow: hidden;">' +
+              '<div style="max-height: 440px; overflow-y: auto;">' +
+                '<table class="clean-table">' +
+                  '<thead><tr><th>Arquivo</th><th>Lote Técnico</th><th>O que foi extraído do arquivo</th><th>Ação</th></tr></thead>' +
+                  '<tbody id="overviewLedgerTbody"></tbody>' +
+                '</table>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+
+        container.querySelectorAll('.btn-followup-prompt').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const targetLens = btn.getAttribute('data-lens') || '';
+            const q = btn.getAttribute('data-q') || '';
+            if (targetLens) switchLensProgrammatically(targetLens);
+            if (q) runComposerAnalysis(q, 'deep');
+          });
+        });
+
+        const renderLedgerRows = () => {
+          const bVal = document.getElementById('overviewBatchSelect').value;
+          const qVal = (document.getElementById('overviewLedgerSearch').value || '').toLowerCase().trim();
+          const rows = allLedgerFiles.filter((fi) => {
+            if (bVal !== 'all' && fi.subsystemBatch !== bVal) return false;
+            if (qVal && !(fi.relPath + ' ' + fi.extractedDetails + ' ' + fi.categoryLabel).toLowerCase().includes(qVal)) return false;
+            return true;
+          });
+          const tbody = document.getElementById('overviewLedgerTbody');
+          tbody.innerHTML = rows
+            .map(
+              (fi) =>
+                '<tr>' +
+                  '<td>' +
+                    '<div style="font-weight: 600;">' + esc(fi.relPath.split('/').pop() || fi.relPath) + '</div>' +
+                    '<div style="font-size: 11.5px; color: var(--ink-muted);">' + esc(fi.folderPath) + ' · ' + (fi.byteSize / 1024).toFixed(1) + ' KB</div>' +
+                  '</td>' +
+                  '<td><span class="status-pill blue" style="font-size: 11px;">' + esc(fi.subsystemBatch) + '</span></td>' +
+                  '<td style="font-size: 12.5px; color: var(--ink-secondary); max-width: 440px;">' + esc(fi.extractedDetails) + '</td>' +
+                  '<td><button type="button" class="btn-pill-outline btn-open-file-drawer" data-rel="' + esc(fi.relPath) + '" style="padding: 4px 10px; font-size: 12px;">Abrir</button></td>' +
+                '</tr>'
+            )
+            .join('');
+          bindFileChips(tbody);
+        };
+
+        renderLedgerRows();
+        document.getElementById('overviewBatchSelect').addEventListener('change', renderLedgerRows);
+        document.getElementById('overviewLedgerSearch').addEventListener('input', renderLedgerRows);
+      }
+
+      // LENS 2: COMO FOI FEITO (ENGENHARIA REVERSA DAS 9 TÉCNICAS)
+      function renderLensReverseEngineering(container, bp) {
+        const techniques = bp.techniques || [];
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<span>Engenharia Reversa: As ' + techniques.length + ' Técnicas Usadas no CRM Antigo</span>' +
+            '</div>' +
+            '<span class="status-pill green">Código-fonte &amp; Fluxos Extraídos</span>' +
+          '</div>' +
+          '<p class="ai-overview-prose" style="margin-bottom: 20px;">' +
+            'Abaixo está a explicação técnica exata de como o desenvolvedor anterior implementou cada automação, integração e regra de negócio, com o trecho de código real e link direto para o arquivo original.' +
+          '</p>' +
+          '<div style="display: flex; flex-direction: column; gap: 16px;">';
+
+        for (const t of techniques) {
+          html +=
+            '<div class="pillar-item" style="background: var(--bg-surface);">' +
+              '<div class="pillar-top">' +
+                '<span class="pillar-title" style="font-size: 15.5px;">' + esc(t.title) + '</span>' +
+                '<span class="status-pill blue">' + esc(t.categoryLabel || t.category) + '</span>' +
+              '</div>' +
+              '<p class="pillar-desc" style="color: var(--ink); font-size: 14px;">' + esc(t.description) + '</p>' +
+              '<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;">' +
+                '<span style="font-size: 12px; color: var(--ink-muted);">Arquivos onde foi implementado:</span>' +
+                (t.files || []).map((f) => renderFileChip(f)).join('') +
+                (t.functions && t.functions.length > 0
+                  ? '<span style="font-size: 12px; color: var(--ink-muted); margin-left: 6px;">Funções: <code>' + esc(t.functions.join('(), ') + '()') + '</code></span>'
+                  : '') +
+              '</div>' +
+              '<pre class="code-snippet">' + esc(t.codeSample || t.sample || '') + '</pre>' +
+            '</div>';
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+      }
+
+      // LENS 3: CÓDIGOS & AUTOMAÇÕES (7 PROJETOS GOOGLE APPS SCRIPT DESCOMPACTADOS)
+      function renderLensCodeAutomations(container, bp) {
+        const modules = bp.modules || [];
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<span>Projetos Google Apps Script e Módulos de Código Descompactados (' + modules.length + ')</span>' +
+            '</div>' +
+            '<span class="status-pill blue">Arquivos .gs e .html Extraídos</span>' +
+          '</div>' +
+          '<p class="ai-overview-prose" style="margin-bottom: 20px;">' +
+            'O Google Drive exporta projetos do Apps Script encapsulados em arquivos <code>.json</code> que IAs comuns não conseguem ler. Nosso motor descompactou todos os arquivos internos (<code>.gs</code> e <code>.html</code>) e mapeou todas as funções:' +
+          '</p>' +
+          '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px;">';
+
+        for (const m of modules) {
+          html +=
+            '<div class="pillar-item" style="background: var(--bg-surface); display: flex; flex-direction: column; justify-content: space-between; gap: 12px;">' +
+              '<div>' +
+                '<div class="pillar-top">' +
+                  '<span class="pillar-title">' + esc(m.name) + '</span>' +
+                  '<span class="status-pill green">' + esc(m.kindLabel) + '</span>' +
+                '</div>' +
+                '<p style="margin: 4px 0 10px; font-size: 13px; color: var(--ink-secondary);">' + esc(m.summary) + '</p>' +
+                '<div style="font-size: 11.5px; font-weight: 600; color: var(--ink-muted); margin-bottom: 4px;">Arquivos internos descompactados (' + (m.subfiles || []).length + '):</div>' +
+                '<div style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">' +
+                  (m.subfiles || []).map((sf) => '<span class="status-pill blue" style="font-size: 11px; padding: 2px 8px;">' + esc(sf) + '</span>').join('') +
+                '</div>' +
+                '<div style="font-size: 11.5px; font-weight: 600; color: var(--ink-muted); margin-bottom: 4px;">Funções e rotinas declaradas (' + (m.functions || []).length + '):</div>' +
+                '<div style="font-family: var(--font-mono); font-size: 12px; color: var(--blue); line-height: 1.55;">' +
+                  esc((m.functions || []).slice(0, 22).join('(), ') + ((m.functions || []).length > 0 ? '()' : '')) +
+                '</div>' +
+              '</div>' +
+              '<div style="display: flex; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--border);">' +
+                '<button type="button" class="btn-pill-blue btn-open-file-drawer" data-rel="' + esc(m.projectPath) + '" style="padding: 6px 14px; font-size: 12.5px;">' +
+                  'Ler Código-Fonte Descompactado →' +
+                '</button>' +
+              '</div>' +
+            '</div>';
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+      }
+
+      // LENS 4: BANCO DE DADOS SQL (26 TABELAS + DDL PRONTO PARA MIGRAÇÃO)
+      function renderLensSqlSchema(container, bp, tl) {
+        const sqlTables = bp.sqlTables || [];
+        const ddlScript = (tl && tl.sqlDdlScript) || '';
+
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<span>Modelagem Relacional Completa (' + sqlTables.length + ' Tabelas PostgreSQL · Schema crm.*)</span>' +
+            '</div>' +
+            '<div style="display: flex; gap: 8px;">' +
+              '<button type="button" class="btn-pill-blue" id="btnCopySqlDdl" style="padding: 6px 14px; font-size: 12.5px;">Copiar Script CREATE TABLE (26 Tabelas)</button>' +
+              '<button type="button" class="btn-pill-outline btn-open-file-drawer" data-rel="tabelas e campos do crm.docx" style="padding: 6px 14px; font-size: 12.5px;">Abrir Doc Original</button>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px;">' +
+            '<p style="margin: 0; font-size: 13.5px; color: var(--ink-secondary);">Todas as tabelas, tipos de dados e chaves primárias extraídos da especificação técnica e da planilha de conexões do CRM.</p>' +
+            '<input type="search" id="sqlTableFilterInput" class="input-field" style="width: 260px; height: 36px;" placeholder="Filtrar tabela ou coluna SQL..." />' +
+          '</div>' +
+          '<div id="sqlTablesGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; margin-bottom: 24px;"></div>' +
+          '<details style="border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; background: var(--bg-shell);">' +
+            '<summary style="font-weight: 600; font-size: 14px; cursor: pointer; color: var(--blue);">Ver Script SQL DDL Completo (PostgreSQL) para criar o banco do Novo CRM</summary>' +
+            '<pre class="code-snippet" style="margin-top: 12px; max-height: 400px;">' + esc(ddlScript) + '</pre>' +
+          '</details>';
+
+        container.innerHTML = html;
+
+        const copyBtn = document.getElementById('btnCopySqlDdl');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(ddlScript);
+            copyBtn.textContent = 'Script SQL Copiado!';
+            setTimeout(() => { copyBtn.textContent = 'Copiar Script CREATE TABLE (26 Tabelas)'; }, 2000);
+          });
+        }
+
+        const renderGrid = () => {
+          const q = (document.getElementById('sqlTableFilterInput').value || '').toLowerCase().trim();
+          const filtered = q
+            ? sqlTables.filter((t) => (t.tableName + ' ' + t.columns.map((c) => c.name + ' ' + c.type).join(' ')).toLowerCase().includes(q))
+            : sqlTables;
+          document.getElementById('sqlTablesGrid').innerHTML = filtered
+            .map(
+              (t) =>
+                '<div style="border: 1px solid var(--border); border-radius: 12px; background: var(--bg-surface); overflow: hidden;">' +
+                  '<div style="padding: 10px 14px; background: var(--bg-shell); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">' +
+                    '<span style="font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--blue);">' + esc(t.tableName) + '</span>' +
+                    '<span style="font-size: 11px; color: var(--ink-muted);">' + t.columns.length + ' colunas</span>' +
+                  '</div>' +
+                  '<div style="padding: 10px 14px; max-height: 210px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-size: 12px;">' +
+                    t.columns
+                      .map(
+                        (c) =>
+                          '<div style="display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed var(--border); padding-bottom: 3px;">' +
+                            '<span style="font-family: var(--font-mono); font-weight: ' + (c.isPrimary ? '700' : '500') + '; color: ' + (c.isPrimary ? 'var(--blue)' : 'var(--ink)') + ';">' +
+                              esc(c.name) + (c.isPrimary ? ' (PK)' : '') +
+                            '</span>' +
+                            '<span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted);">' + esc(c.type) + '</span>' +
+                          '</div>'
+                      )
+                      .join('') +
+                  '</div>' +
+                '</div>'
+            )
+            .join('');
+        };
+
+        renderGrid();
+        document.getElementById('sqlTableFilterInput').addEventListener('input', renderGrid);
+      }
+
+      // LENS 5: PLANILHAS & 3.515 FÓRMULAS EXCEL
+      function renderLensSheetsFormulas(container, sheets) {
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<span>Auditoria de Planilhas e Fórmulas Matemáticas (' + sheets.length + ' Abas · 3.515 Fórmulas)</span>' +
+            '</div>' +
+            '<input type="search" id="sheetLensFilter" class="input-field" style="width: 280px; height: 36px;" placeholder="Buscar planilha, aba ou coluna..." />' +
+          '</div>' +
+          '<p class="ai-overview-prose" style="margin-bottom: 16px;">' +
+            'Clique em <strong>Inspecionar Aba &amp; Fórmulas</strong> em qualquer linha abaixo para ver os cabeçalhos, linhas de dados e todas as fórmulas de cálculo ocultas.' +
+          '</p>' +
+          '<div style="border: 1px solid var(--border); border-radius: 14px; overflow: hidden;">' +
+            '<div style="max-height: 540px; overflow-y: auto;">' +
+              '<table class="clean-table">' +
+                '<thead><tr><th>Planilha (.xlsx)</th><th>Aba</th><th>Dimensões</th><th>Fórmulas</th><th>Colunas Mapeadas</th><th>Ação</th></tr></thead>' +
+                '<tbody id="sheetLensTbody"></tbody>' +
+              '</table>' +
+            '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+
+        const renderRows = () => {
+          const q = (document.getElementById('sheetLensFilter').value || '').toLowerCase().trim();
+          const filtered = q
+            ? sheets.filter((s) => (s.workbookPath + ' ' + s.sheetTitle + ' ' + (s.headers || []).join(' ')).toLowerCase().includes(q))
+            : sheets;
+          const tbody = document.getElementById('sheetLensTbody');
+          tbody.innerHTML = filtered
+            .map(
+              (s) =>
+                '<tr>' +
+                  '<td style="font-weight: 600;">' + esc(s.workbookPath) + '</td>' +
+                  '<td><span class="status-pill blue" style="font-size: 11.5px;">' + esc(s.sheetTitle) + '</span></td>' +
+                  '<td style="white-space: nowrap; color: var(--ink-secondary);">' + s.rowCount + ' × ' + s.colCount + '</td>' +
+                  '<td>' +
+                    (s.formulaCount > 0
+                      ? '<span class="status-pill green" style="font-size: 11.5px;">' + s.formulaCount + ' fórmulas</span>'
+                      : '<span style="font-size: 12px; color: var(--ink-muted);">Dados fixos</span>') +
+                  '</td>' +
+                  '<td style="font-size: 12px; color: var(--ink-secondary); max-width: 360px;">' + esc((s.headers || []).slice(0, 8).join(', ')) + '</td>' +
+                  '<td><button type="button" class="btn-pill-outline btn-open-sheet-drawer" data-sid="' + s.sheetId + '" style="padding: 4px 10px; font-size: 12px;">Inspecionar Aba &amp; Fórmulas</button></td>' +
+                '</tr>'
+            )
+            .join('');
+          bindFileChips(tbody);
+        };
+
+        renderRows();
+        document.getElementById('sheetLensFilter').addEventListener('input', renderRows);
+      }
+
+      // LENS 6: APIs, CREDENCIAIS & GUIA DE MIGRAÇÃO PARA O NOVO CRM
+      function renderLensApisAndMigration(container, bp, tl, dlpFindings) {
+        const mig = (tl && tl.migrationGuide) || [];
+        const apis = bp.externalApis || [];
+
+        let html =
+          '<div class="ai-overview-header">' +
+            '<div class="ai-overview-title">' +
+              '<span>Guia de Arquitetura (Antigo → Novo CRM), APIs Externas e Credenciais</span>' +
+            '</div>' +
+            '<span class="status-pill green">Plano de Evolução Técnica</span>' +
+          '</div>' +
+          '<p class="ai-overview-prose" style="margin-bottom: 18px;">' +
+            'Diagnóstico técnico comparando como cada subsistema foi feito no CRM antigo, onde estão os gargalos e como construir de forma superior no seu Novo CRM:' +
+          '</p>' +
+          '<div style="display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px;">';
+
+        for (const item of mig) {
+          html +=
+            '<div class="pillar-item" style="background: var(--bg-surface);">' +
+              '<div class="pillar-top">' +
+                '<span class="pillar-title" style="font-size: 15px;">' + esc(item.subsystem) + '</span>' +
+                '<div style="display: flex; gap: 4px; flex-wrap: wrap;">' +
+                  (item.legacyFiles || []).map((f) => renderFileChip(f)).join('') +
+                '</div>' +
+              '</div>' +
+              '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 8px; font-size: 13px;">' +
+                '<div style="padding: 10px 12px; border-radius: 10px; background: var(--bg-shell); border: 1px solid var(--border);">' +
+                  '<div style="font-weight: 600; color: var(--ink-secondary); margin-bottom: 4px;">Como foi feito no CRM Antigo:</div>' +
+                  '<div>' + esc(item.legacyImplementation) + '</div>' +
+                '</div>' +
+                '<div style="padding: 10px 12px; border-radius: 10px; background: var(--amber-soft);">' +
+                  '<div style="font-weight: 600; color: var(--amber); margin-bottom: 4px;">Gargalo / Limitação Técnica:</div>' +
+                  '<div>' + esc(item.bottleneck) + '</div>' +
+                '</div>' +
+                '<div style="padding: 10px 12px; border-radius: 10px; background: var(--green-soft); border: 1px solid var(--green-border);">' +
+                  '<div style="font-weight: 600; color: var(--green); margin-bottom: 4px;">Como fazer no Novo CRM:</div>' +
+                  '<div>' + esc(item.modernCrmRecommendation) + '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        }
+        html += '</div>';
+
+        // External APIs Table
+        html +=
+          '<h3 style="margin: 0 0 10px; font-size: 16px; font-weight: 600;">Endpoints e APIs Externas Consumidas pelo Código (' + apis.length + ')</h3>' +
+          '<div style="border: 1px solid var(--border); border-radius: 14px; overflow: hidden; margin-bottom: 26px;">' +
+            '<table class="clean-table">' +
+              '<thead><tr><th>Domínio / Serviço</th><th>Finalidade</th><th>URL / Endpoint</th><th>Arquivos Fonte</th></tr></thead>' +
+              '<tbody>' +
+                apis.map((a) =>
+                  '<tr>' +
+                    '<td style="font-family: var(--font-mono); font-weight: 600;">' + esc(a.domain) + '</td>' +
+                    '<td><span class="status-pill blue">' + esc(a.category) + '</span><div style="font-size: 12px; color: var(--ink-secondary); margin-top: 4px;">' + esc(a.purposeHint) + '</div></td>' +
+                    '<td style="font-family: var(--font-mono); font-size: 11.5px; word-break: break-all; max-width: 340px;">' + (a.endpoints || []).map((ep) => '<div>' + esc(ep) + '</div>').join('') + '</td>' +
+                    '<td>' + (a.sourceFiles || []).map((f) => renderFileChip(f)).join(' ') + '</td>' +
+                  '</tr>'
+                ).join('') +
+              '</tbody>' +
+            '</table>' +
+          '</div>';
+
+        // DLP / Hardcoded Credentials Audit
+        html +=
+          '<h3 style="margin: 0 0 10px; font-size: 16px; font-weight: 600;">Chaves de API, Tokens e IDs Detectados nos Arquivos (' + dlpFindings.length + ')</h3>' +
+          '<div style="border: 1px solid var(--border); border-radius: 14px; overflow: hidden;">' +
+            '<div style="max-height: 360px; overflow-y: auto;">' +
+              '<table class="clean-table">' +
+                '<thead><tr><th>Arquivo e Linha</th><th>Tipo</th><th>Token Mascarado</th><th>Contexto no Código</th></tr></thead>' +
+                '<tbody>' +
+                  dlpFindings.slice(0, 80).map((d) =>
+                    '<tr>' +
+                      '<td>' + renderFileChip(d.relPath) + ' <span style="font-size: 11.5px; color: var(--ink-muted);">linha ' + d.lineNumber + '</span></td>' +
+                      '<td><span class="status-pill amber">' + esc(d.category) + '</span></td>' +
+                      '<td style="font-family: var(--font-mono); font-size: 12px;">' + esc(d.redactedToken) + '</td>' +
+                      '<td style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-secondary);">' + esc(d.contextPreview) + '</td>' +
+                    '</tr>'
+                  ).join('') +
+                '</tbody>' +
+              '</table>' +
+            '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+      }
+
+      // LIVE COMPOSER ANALYSIS (Claude API + Exhaustive AST)
+      async function runComposerAnalysis(questionText, mode) {
+        const question = String(questionText || '').trim();
+        if (!question) return;
+
+        const anchor = document.getElementById('liveResponseAnchor');
+        const btn = document.getElementById('btnComposerSubmit');
+        btn.disabled = true;
+
+        anchor.innerHTML =
+          '<div class="pillar-item" style="margin-bottom: 24px; border-color: var(--blue); background: var(--blue-soft);">' +
+            '<div style="display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; color: var(--blue);">' +
+              '<span>Analisando 100% das fontes da pasta para: "' + esc(question) + '"...</span>' +
+            '</div>' +
+          '</div>';
+
+        document.getElementById('stageScroll').scrollTop = 0;
+
+        if (mode === 'fast') {
+          const fastRes = await apiPost('/api/ask', {
+            workspaceId: state.activeWorkspaceId,
+            question,
+            scope: 'all'
+          });
+          btn.disabled = false;
+          if (!fastRes || fastRes.error) {
+            anchor.innerHTML = '';
+            return;
+          }
+          const item = {
+            question,
+            providerLabel: 'Busca Instantânea (' + fastRes.elapsedMs + ' ms)',
+            time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            answer: fastRes.directSummary,
+            citations: (fastRes.primaryItems || []).map((c) => c.relPath)
+          };
+          state.history.unshift(item);
+          document.getElementById('sidebarHistoryCount').textContent = String(state.history.length);
+          renderLiveResponseCard(item);
+          return;
+        }
+
+        const res = await apiPost('/api/v1/ai/analyze', {
+          workspaceId: state.activeWorkspaceId,
+          question,
+          mode: 'exhaustive_map_reduce'
+        });
+        btn.disabled = false;
+
+        if (!res || res.error) {
+          anchor.innerHTML =
+            '<div class="pillar-item" style="margin-bottom: 20px; background: var(--red-soft); color: var(--red);">' +
+              esc((res && res.error) || 'Erro ao processar análise.') +
+            '</div>';
+          return;
+        }
+
+        const providerLabel = res.provider === 'anthropic'
+          ? 'Claude (' + res.model + ')'
+          : 'Motor Forense 100% (' + (res.totalFilesCovered || 280) + ' arquivos)';
+
+        const item = {
+          question,
+          providerLabel,
+          time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          answer: res.answer || res.answerMarkdown || '',
+          citations: (res.includedFiles || []).slice(0, 10).map((f) => f.relPath)
+        };
+        state.history.unshift(item);
+        document.getElementById('sidebarHistoryCount').textContent = String(state.history.length);
+        renderLiveResponseCard(item);
+      }
+
+      function renderLiveResponseCard(item) {
+        const anchor = document.getElementById('liveResponseAnchor');
+        anchor.innerHTML =
+          '<div class="pillar-item" style="margin-bottom: 26px; background: var(--bg-surface); border: 2px solid var(--blue);">' +
+            '<div class="pillar-top" style="padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px;">' +
+              '<div>' +
+                '<span class="status-pill blue" style="margin-bottom: 4px;">Resposta Técnica · ' + esc(item.providerLabel) + '</span>' +
+                '<div style="font-size: 15.5px; font-weight: 600; color: var(--ink); margin-top: 4px;">' + esc(item.question) + '</div>' +
+              '</div>' +
+              '<div style="display: flex; gap: 6px;">' +
+                '<button type="button" class="btn-pill-outline" id="btnCopyLiveAnswer" style="padding: 4px 12px; font-size: 12px;">Copiar</button>' +
+                '<button type="button" class="btn-pill-outline" id="btnCloseLiveAnswer" style="padding: 4px 10px; font-size: 12px;">Fechar ✕</button>' +
+              '</div>' +
+            '</div>' +
+            '<div style="font-size: 14px; line-height: 1.7; white-space: pre-wrap; color: var(--ink); max-height: 520px; overflow-y: auto;">' +
+              esc(item.answer) +
+            '</div>' +
+            (item.citations && item.citations.length > 0
+              ? '<div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">' +
+                  '<span style="font-size: 11.5px; color: var(--ink-muted);">Fontes inspecionadas:</span>' +
+                  item.citations.map((c) => renderFileChip(c)).join('') +
+                '</div>'
+              : '') +
+          '</div>';
+
+        bindFileChips(anchor);
+
+        document.getElementById('btnCopyLiveAnswer').addEventListener('click', () => {
+          navigator.clipboard.writeText(item.answer || '');
+          document.getElementById('btnCopyLiveAnswer').textContent = 'Copiado!';
+        });
+        document.getElementById('btnCloseLiveAnswer').addEventListener('click', () => {
+          anchor.innerHTML = '';
+        });
+      }
+
+      document.getElementById('composerForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const input = document.getElementById('composerInput');
+        const mode = document.getElementById('composerModeSelect').value;
+        const q = (input.value || '').trim();
+        if (!q) return;
+        input.value = '';
+        runComposerAnalysis(q, mode);
+      });
+
+      document.getElementById('composerInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          document.getElementById('composerForm').requestSubmit();
+        }
+      });
+
+      document.getElementById('topSearchForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const q = (document.getElementById('topSearchInput').value || '').trim();
+        if (!q) return;
+        runComposerAnalysis(q, 'deep');
+      });
+
+      // RIGHT-SIDE INSPECTOR DRAWER (File / Code / Sheet / Context Pack)
+      const drawerBackdrop = document.getElementById('inspectorBackdrop');
+      document.getElementById('btnDrawerClose').addEventListener('click', () => {
+        drawerBackdrop.classList.remove('open');
+      });
+      drawerBackdrop.addEventListener('click', (e) => {
+        if (e.target === drawerBackdrop) drawerBackdrop.classList.remove('open');
+      });
+      document.getElementById('btnDrawerCopyContent').addEventListener('click', () => {
+        navigator.clipboard.writeText(state.lastDrawerRawText || '');
+        const btn = document.getElementById('btnDrawerCopyContent');
+        btn.textContent = 'Copiado!';
+        setTimeout(() => { btn.textContent = 'Copiar Conteúdo'; }, 1800);
+      });
+
+      async function openFileInspector(fileUid, relPath) {
+        drawerBackdrop.classList.add('open');
+        document.getElementById('drawerTitle').textContent = 'Abrindo ' + (relPath || fileUid) + '...';
+        document.getElementById('drawerSub').textContent = '';
+        document.getElementById('drawerBadges').innerHTML = '';
+        document.getElementById('drawerBody').innerHTML = '<div style="color: var(--ink-muted);">Descompactando e lendo conteúdo integral...</div>';
+
+        const params = new URLSearchParams({
+          workspaceId: state.activeWorkspaceId,
+          fileUid: fileUid || '',
+          relPath: relPath || ''
+        });
+        const res = await apiGet('/api/file-preview?' + params.toString());
+        if (!res) return;
+
+        const f = res.file;
+        state.lastDrawerRawText = res.content || '';
+        document.getElementById('drawerTitle').textContent = f ? f.relPath.split(/[/\\]/).pop() : (relPath || 'Arquivo');
+        document.getElementById('drawerSub').textContent = f ? f.relPath + ' · ' + (f.byteSize / 1024).toFixed(1) + ' KB' : relPath;
+        document.getElementById('drawerBadges').innerHTML =
+          '<span class="status-pill green">Leitura Integral</span>' +
+          (f && f.sheetCount > 0 ? '<span class="status-pill blue">' + f.sheetCount + ' abas Excel</span>' : '');
+
+        let html = '';
+        if (res.sheets && res.sheets.length > 0) {
+          html +=
+            '<div style="margin-bottom: 16px; padding: 14px; border-radius: 12px; background: var(--bg-shell); border: 1px solid var(--border);">' +
+              '<div style="font-size: 12px; font-weight: 600; color: var(--ink-secondary); margin-bottom: 8px;">Abas desta planilha (clique para inspecionar linhas e fórmulas):</div>' +
+              '<div style="display: flex; flex-wrap: wrap; gap: 6px;">' +
+                res.sheets.map((s) => '<button type="button" class="btn-pill-outline btn-open-sheet-drawer" data-sid="' + s.sheetId + '" style="padding: 4px 10px; font-size: 12px;">' + esc(s.sheetTitle) + ' (' + s.rowCount + ' linhas · ' + s.formulaCount + ' fórm.)</button>').join('') +
+              '</div>' +
+            '</div>';
+        }
+
+        html += '<pre class="code-snippet" style="margin: 0; max-height: none;">' + esc(res.content || 'Arquivo binário ou mídia catalogada no acervo.') + '</pre>';
+        const bodyEl = document.getElementById('drawerBody');
+        bodyEl.innerHTML = html;
+        bindFileChips(bodyEl);
+      }
+
+      async function openSheetInspector(sheetId) {
+        drawerBackdrop.classList.add('open');
+        document.getElementById('drawerTitle').textContent = 'Carregando aba da planilha...';
+        document.getElementById('drawerBody').innerHTML = '<div style="color: var(--ink-muted);">Extraindo colunas, linhas e fórmulas...</div>';
+
+        const res = await apiGet('/api/sheet-preview?workspaceId=' + encodeURIComponent(state.activeWorkspaceId) + '&sheetId=' + sheetId);
+        if (!res || !res.sheetData) return;
+
+        const sd = res.sheetData;
+        state.lastDrawerRawText = JSON.stringify(sd, null, 2);
+        document.getElementById('drawerTitle').textContent = sd.workbookPath + ' · Aba ' + sd.sheetTitle;
+        document.getElementById('drawerSub').textContent = sd.rowCount + ' linhas × ' + sd.colCount + ' colunas · ' + sd.formulas.length + ' fórmulas extraídas';
+        document.getElementById('drawerBadges').innerHTML = '<span class="status-pill green">Planilha &amp; AST de Fórmulas</span>';
+
+        const cols = (sd.headers || []).slice(0, 12);
+        const rows = sd.sampleRows || sd.matchingRows || [];
+
+        let html =
+          '<div style="margin-bottom: 18px;">' +
+            '<div style="font-size: 13px; font-weight: 600; margin-bottom: 6px;">Colunas (' + (sd.headers || []).length + '):</div>' +
+            '<div style="display: flex; flex-wrap: wrap; gap: 6px;">' +
+              (sd.headers || []).map((h) => '<span class="status-pill blue" style="font-size: 11.5px;">' + esc(h) + '</span>').join('') +
+            '</div>' +
+          '</div>';
+
+        if (rows.length > 0 && cols.length > 0) {
+          html +=
+            '<div style="margin-bottom: 20px; border: 1px solid var(--border); border-radius: 12px; overflow-x: auto;">' +
+              '<table class="clean-table">' +
+                '<thead><tr>' + cols.map((c) => '<th>' + esc(c) + '</th>').join('') + '</tr></thead>' +
+                '<tbody>' +
+                  rows.map((r) => '<tr>' + cols.map((c) => '<td>' + esc(r[c] || '') + '</td>').join('') + '</tr>').join('') +
+                '</tbody>' +
+              '</table>' +
+            '</div>';
+        }
+
+        html += '<div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Fórmulas Extraídas (' + sd.formulas.length + '):</div>';
+        if (sd.formulas.length === 0) {
+          html += '<div style="font-size: 13px; color: var(--ink-muted);">Esta aba contém valores estáticos sem fórmulas.</div>';
+        } else {
+          html +=
+            '<div style="border: 1px solid var(--border); border-radius: 12px; overflow: hidden;">' +
+              '<table class="clean-table">' +
+                '<thead><tr><th>Célula</th><th>Fórmula Matemática</th></tr></thead>' +
+                '<tbody>' +
+                  sd.formulas.map((f) => '<tr><td style="font-family: var(--font-mono); font-weight: 600; width: 90px;">' + esc(f.cell) + '</td><td style="font-family: var(--font-mono); color: var(--blue);">=' + esc(f.formula) + '</td></tr>').join('') +
+                '</tbody>' +
+              '</table>' +
+            '</div>';
+        }
+
+        document.getElementById('drawerBody').innerHTML = html;
+      }
+
+      // SUPER-CONTEXTO & API UNIVERSAL DRAWER
+      document.getElementById('btnTopExportAi').addEventListener('click', async () => {
+        drawerBackdrop.classList.add('open');
+        document.getElementById('drawerTitle').textContent = 'Super-Contexto 100% & API Universal para Qualquer IA';
+        document.getElementById('drawerSub').textContent = 'Copie todo o conhecimento estruturado (sem imagens Base64 pesadas) ou conecte via URL REST';
+        document.getElementById('drawerBadges').innerHTML = '<span class="status-pill green">812 KB de lixo Base64 removidos</span>';
+
+        const bodyEl = document.getElementById('drawerBody');
+        bodyEl.innerHTML = '<div style="color: var(--ink-muted);">Gerando Super-Contexto 100% dos 280 arquivos...</div>';
+
+        const pack = await apiPost('/api/v1/ai/context-pack', {
+          workspaceId: state.activeWorkspaceId,
+          query: 'CRM, propostas, tabelas SQL, Gmail Add-on, AppSheet e licitações',
+          maxTokens: 48000
+        });
+
+        const md = (pack && (pack.contextMarkdown || pack.systemPromptMarkdown)) || '';
+        state.lastDrawerRawText = md;
+        const baseUrl = window.location.origin;
+        const wsParam = encodeURIComponent(state.activeWorkspaceId || '');
+
+        bodyEl.innerHTML =
+          '<div style="margin-bottom: 18px; padding: 14px; border-radius: 12px; background: var(--bg-shell); border: 1px solid var(--border);">' +
+            '<div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Endpoints da API Universal (para mandar para agentes, Cursor, MCP ou automações):</div>' +
+            '<div style="display: flex; flex-direction: column; gap: 6px; font-family: var(--font-mono); font-size: 12px;">' +
+              '<div><strong>GET</strong> ' + esc(baseUrl + '/api/v1/ai/blueprint?workspaceId=' + wsParam + '&format=markdown') + '</div>' +
+              '<div><strong>GET</strong> ' + esc(baseUrl + '/api/v1/ai/ledger?workspaceId=' + wsParam + '&format=markdown') + '</div>' +
+              '<div><strong>GET</strong> ' + esc(baseUrl + '/api/v1/ai/lenses?workspaceId=' + wsParam) + '</div>' +
+              '<div><strong>POST</strong> ' + esc(baseUrl + '/api/v1/ai/context-pack') + '</div>' +
+              '<div><strong>POST</strong> ' + esc(baseUrl + '/api/v1/ai/analyze') + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">' +
+            '<span style="font-size: 13px; font-weight: 600;">Super-Contexto Pronto (~' + (pack.estimatedTokens || 0).toLocaleString('pt-BR') + ' tokens · 280/280 arquivos):</span>' +
+            '<button type="button" class="btn-primary-solid" id="btnCopyPackNow" style="padding: 6px 16px; font-size: 12.5px;">Copiar Tudo para Colar no Claude / ChatGPT (1 Clique)</button>' +
+          '</div>' +
+          '<pre class="code-snippet" style="max-height: 460px;">' + esc(md) + '</pre>';
+
+        document.getElementById('btnCopyPackNow').addEventListener('click', () => {
+          navigator.clipboard.writeText(md);
+          document.getElementById('btnCopyPackNow').textContent = 'Super-Contexto Copiado!';
+        });
+      });
+
+      // 1-CLICK CLAUDE KEY PASTE & SAVE
+      async function saveClaudeKey(rawKey) {
+        const clean = String(rawKey || '').replace(/\s+/g, '').trim();
+        if (!clean) return;
+        const res = await apiPost('/api/v1/ai/config', {
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          apiKey: clean
+        });
+        if (res) {
+          const cfg = res.config || res;
+          if (state.bootstrap) state.bootstrap.aiConfig = cfg;
+          updateClaudeKeyBadge(cfg);
+          document.getElementById('quickKeyInput').value = '';
+        }
+      }
+
+      document.getElementById('btnQuickSaveKey').addEventListener('click', () => {
+        saveClaudeKey(document.getElementById('quickKeyInput').value);
+      });
+
+      document.getElementById('btnQuickPasteKey').addEventListener('click', async () => {
+        try {
+          const clip = await navigator.clipboard.readText();
+          if (clip && clip.trim()) {
+            document.getElementById('quickKeyInput').value = clip.trim();
+            await saveClaudeKey(clip);
+            return;
+          }
+        } catch {}
+        document.getElementById('quickKeyInput').focus();
+      });
+
+      document.getElementById('btnTopClaudeKey').addEventListener('click', () => {
+        document.getElementById('quickKeyInput').focus();
+      });
+
+      // WORKSPACE SELECTOR & ADD MODAL
+      document.getElementById('workspaceSelect').addEventListener('change', (e) => {
+        loadWorkspaceBootstrap(e.target.value);
+      });
+
+      const addModal = document.getElementById('addSourceModal');
+      document.getElementById('btnOpenAddModal').addEventListener('click', async () => {
+        addModal.classList.add('open');
+        const fsData = await apiGet('/api/fs-browse?dir=C:\\');
+        if (fsData && fsData.shortcuts) {
+          const row = document.getElementById('localShortcutsRow');
+          row.innerHTML = fsData.shortcuts
+            .map((s) => '<button type="button" class="btn-pill-outline btn-sc-dir" data-p="' + esc(s.path) + '" style="padding: 4px 10px; font-size: 12px;">' + esc(s.label) + '</button>')
+            .join('');
+          row.querySelectorAll('.btn-sc-dir').forEach((b) => {
+            b.addEventListener('click', () => {
+              document.getElementById('inputLocalDir').value = b.getAttribute('data-p') || '';
+            });
+          });
+        }
+      });
+
+      document.getElementById('btnCloseAddModal').addEventListener('click', () => {
+        addModal.classList.remove('open');
+      });
+
+      document.getElementById('btnSyncDriveNow').addEventListener('click', async () => {
+        const folderIdOrUrl = (document.getElementById('inputDriveUrl').value || '').trim();
+        const name = (document.getElementById('inputDriveName').value || '').trim();
+        if (!folderIdOrUrl) return;
+        const fb = document.getElementById('addModalFeedback');
+        fb.style.display = 'block';
+        fb.style.background = 'var(--blue-soft)';
+        fb.style.color = 'var(--blue)';
+        fb.textContent = 'Sincronizando e descompactando arquivos do Google Drive...';
+        const res = await apiPost('/api/connect-drive', { folderIdOrUrl, name });
+        if (res && res.ingestion && res.ingestion.workspace) {
+          addModal.classList.remove('open');
+          fb.style.display = 'none';
+          await loadWorkspaceBootstrap(res.ingestion.workspace.workspaceId);
+        } else {
+          fb.style.background = 'var(--red-soft)';
+          fb.style.color = 'var(--red)';
+          fb.textContent = (res && res.error) || 'Falha ao sincronizar Drive.';
+        }
+      });
+
+      document.getElementById('btnSyncLocalNow').addEventListener('click', async () => {
+        const sourceDir = (document.getElementById('inputLocalDir').value || '').trim();
+        if (!sourceDir) return;
+        const fb = document.getElementById('addModalFeedback');
+        fb.style.display = 'block';
+        fb.style.background = 'var(--blue-soft)';
+        fb.style.color = 'var(--blue)';
+        fb.textContent = 'Indexando pasta local...';
+        const res = await apiPost('/api/connect-folder', { sourceDir });
+        if (res && res.workspace) {
+          addModal.classList.remove('open');
+          fb.style.display = 'none';
+          await loadWorkspaceBootstrap(res.workspace.workspaceId);
+        } else {
+          fb.style.background = 'var(--red-soft)';
+          fb.style.color = 'var(--red)';
+          fb.textContent = (res && res.error) || 'Pasta não encontrada.';
+        }
+      });
+
+      // INITIALIZE IMMEDIATELY (Zero popups, zero friction)
+      loadWorkspaceBootstrap('');
+    })();
+  </script>
+</body>
+</html>

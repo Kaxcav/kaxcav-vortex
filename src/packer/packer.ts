@@ -82,9 +82,11 @@ export class SubmodularPacker {
           const nodeIdx = fileIdToIndex.get(h.fileId)
           if (nodeIdx !== undefined) {
             const fRow = indexToFile[nodeIdx]
+            if (!shard.matchesPathAndCorpus(fRow.relPath, fRow.lang, req.path, req.corpus)) continue
             const hubDamp = fRow.isHub ? 0.28 : 1.0
+            const authMult = shard.computeAuthorityMultiplier(fRow.relPath, fRow.summary)
             const prev = fileSeedScores.get(nodeIdx) ?? 0
-            fileSeedScores.set(nodeIdx, prev + Math.abs(h.score) * 2.2 * hubDamp)
+            fileSeedScores.set(nodeIdx, prev + Math.abs(h.score) * 2.2 * hubDamp * authMult)
           }
         }
       } catch {}
@@ -104,15 +106,17 @@ export class SubmodularPacker {
           .all(ftsExpr) as Array<{ symId: number; fileId: number; score: number }>
 
         for (const sh of symHits) {
-          const val = Math.abs(sh.score)
-          symBoostById.set(sh.symId, (symBoostById.get(sh.symId) ?? 0) + val * 2.5)
           const nodeIdx = fileIdToIndex.get(sh.fileId)
           if (nodeIdx !== undefined) {
             const fRow = indexToFile[nodeIdx]
+            if (!shard.matchesPathAndCorpus(fRow.relPath, fRow.lang, req.path, req.corpus)) continue
+            const val = Math.abs(sh.score)
+            const authMult = shard.computeAuthorityMultiplier(fRow.relPath, fRow.summary)
+            symBoostById.set(sh.symId, (symBoostById.get(sh.symId) ?? 0) + val * 2.5 * authMult)
             const hubDamp = fRow.isHub ? 0.3 : 1.0
             fileSeedScores.set(
               nodeIdx,
-              (fileSeedScores.get(nodeIdx) ?? 0) + val * 1.6 * hubDamp,
+              (fileSeedScores.get(nodeIdx) ?? 0) + val * 1.6 * hubDamp * authMult,
             )
           }
         }
@@ -122,6 +126,7 @@ export class SubmodularPacker {
     // Exact path & filename lexical boost
     for (let i = 0; i < indexToFile.length; i++) {
       const f = indexToFile[i]
+      if (!shard.matchesPathAndCorpus(f.relPath, f.lang, req.path, req.corpus)) continue
       const relLower = f.relPath.toLowerCase()
       const baseLower = (relLower.split('/').pop() ?? relLower).replace(/\.\w+$/, '')
       let exactHits = 0
@@ -136,7 +141,8 @@ export class SubmodularPacker {
       }
       if (exactHits > 0) {
         const hubDamp = f.isHub ? 0.32 : 1.0
-        fileSeedScores.set(i, (fileSeedScores.get(i) ?? 0) + exactHits * 3.0 * hubDamp)
+        const authMult = shard.computeAuthorityMultiplier(f.relPath, f.summary)
+        fileSeedScores.set(i, (fileSeedScores.get(i) ?? 0) + exactHits * 3.0 * hubDamp * authMult)
       }
 
       // Worktree Recency Gravity: files modified in the last 30 minutes get an automatic boost
@@ -151,7 +157,8 @@ export class SubmodularPacker {
     // Fallback seed if query had zero lexical overlap: pick top non-hub entrypoints
     if (fileSeedScores.size === 0 && indexToFile.length > 0) {
       for (let i = 0; i < Math.min(indexToFile.length, 15); i++) {
-        if (!indexToFile[i].isHub) {
+        const f = indexToFile[i]
+        if (!f.isHub && shard.matchesPathAndCorpus(f.relPath, f.lang, req.path, req.corpus)) {
           fileSeedScores.set(i, 1.0)
         }
       }
@@ -167,10 +174,12 @@ export class SubmodularPacker {
     const combinedFileScores: Array<{ fileId: number; nodeIdx: number; score: number }> = []
     for (let i = 0; i < indexToFile.length; i++) {
       const f = indexToFile[i]
+      if (!shard.matchesPathAndCorpus(f.relPath, f.lang, req.path, req.corpus)) continue
       const seed = fileSeedScores.get(i) ?? 0
       const ppr = pprScores[i] * 100
       const hubFactor = f.isHub ? 0.35 : 1.0
-      const finalScore = (seed * 0.65 + ppr * 0.35) * hubFactor
+      const authMult = shard.computeAuthorityMultiplier(f.relPath, f.summary)
+      const finalScore = (seed * 0.65 + ppr * 0.35) * hubFactor * authMult
       if (finalScore > 0.001) {
         combinedFileScores.push({ fileId: f.fileId, nodeIdx: i, score: finalScore })
       }
@@ -381,6 +390,10 @@ export class SubmodularPacker {
     }
 
     const filesList = [...fileAgg.values()].sort((a, b) => b.score - a.score)
+    const reusableSymbols = shard
+      .search(req.task, { limit: 8 })
+      .filter((h) => h.kind === 'function' || h.kind === 'class' || h.kind === 'const')
+
     const markdown = this.renderMarkdownPack(
       shard.repositoryPath,
       req.task,
@@ -391,8 +404,8 @@ export class SubmodularPacker {
       filesList,
       packedSlices,
       federationLinks,
+      reusableSymbols,
     )
-
     const elapsedMs = Math.round((performance.now() - t0) * 100) / 100
     const result: ContextPackResult = {
       etag: packEtag,
@@ -408,6 +421,7 @@ export class SubmodularPacker {
       elapsedMs,
       files: filesList,
       slices: packedSlices,
+      reusableSymbols,
       federationLinks,
       markdown,
     }
@@ -451,6 +465,7 @@ export class SubmodularPacker {
     files: ContextPackResult['files'],
     slices: PackedSlice[],
     federationLinks: FederationLink[],
+    reusableSymbols?: any[],
   ): string {
     const out: string[] = []
     out.push(
@@ -474,6 +489,12 @@ export class SubmodularPacker {
       }
     }
 
+    if (reusableSymbols && reusableSymbols.length > 0) {
+      out.push('', '### Reusable Symbols & Contracts (Do Not Duplicate)');
+      for (const rs of reusableSymbols) {
+        out.push(`- \`${rs.qualifiedName}\`: ${rs.docSummary || rs.signature}`);
+      }
+    }
     out.push('', '## Surgical Code & Knowledge Slices')
     for (const s of slices) {
       out.push(

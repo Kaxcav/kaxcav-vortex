@@ -1,4 +1,4 @@
-# Kaxcav Vortex (`kvx` v2.0.0-apex)
+# Kaxcav Vortex (`kvx` v3.1.0-apex)
 
 [![Version](https://img.shields.io/badge/version-2.0.0--apex-10b981?style=flat-square)](https://github.com/Kaxcav/kaxcav-vortex)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.5.0-3b82f6?style=flat-square)](https://nodejs.org)
@@ -142,16 +142,31 @@ Adicione no seu `mcp.json` / `claude_desktop_config.json`:
 }
 ```
 
-### 10 Ferramentas MCP Expostas Automaticamente aos Agentes
-1. `context`: Pacote de contexto ranqueado por `PPR-HD` + `BM25F` com fatiamento `L0–L3` e suporte a `if_none_match` / `delta_from`.
-2. `file_outline`: Esqueleto estrutural completo de qualquer arquivo em ~40 tokens.
-3. `read_symbol`: Leitura cirúrgica apenas da função/classe solicitada.
-4. `call_graph`: Chamadores diretos (`callers`) e funções chamadas (`callees`).
-5. `diff_impact`: Detector de *Contract Drift* (mudanças de assinatura) e arquivos editados na sessão.
-6. `blast_radius`: Impacto direto, transitivo, testes afetados e impactos cruzados entre repositórios.
-7. `affected`: Seleção determinística de testes impactados por arquivos alterados.
-8. `search` / `search_symbols`: Busca híbrida léxica e estrutural.
-9. `index_health`: Saúde dos shards SQLite, uso de RAM e auditoria de tokens economizados.
+Para agentes que só devem ler código (por exemplo, o agy sem interface), registre também o servidor só de leitura:
+
+```json
+"kaxcav-vortex-ro": {
+  "command": "node",
+  "args": ["--experimental-strip-types", "--no-warnings", "/caminho/para/kaxcav-vortex/src/cli/main.ts", "serve", "--mcp", "--read-only"]
+}
+```
+
+No agy, `agy mcp add kaxcav-vortex-ro -- node --experimental-strip-types --no-warnings <main.ts> serve --mcp --read-only` e uma regra só em `~/.gemini/antigravity-cli/settings.json`: `mcp(kaxcav-vortex-ro/*)` (verificado em 08/11/2026). Nenhuma `nexus_*` fica exposta.
+
+### Ferramentas MCP (13; 10 no servidor só de leitura)
+1. `context`: pacote de contexto ranqueado por `PPR-HD` + `BM25F` com fatiamento `L0–L3` e suporte a `if_none_match` / `delta_from`.
+2. `file_outline`: esqueleto do arquivo com o intervalo real de cada símbolo; `escopo` = `topo` (padrão: módulo + membros de classe), `exportado` ou `tudo`. Caminho absoluto ou relativo; se o arquivo não estiver indexado, diz por quê e sugere parecidos.
+3. `read_symbol`: só o trecho do símbolo; aceita `nome`, `Classe.metodo`, `caminho#nome` e `path`. Sem resultado, devolve o motivo, nomes parecidos e ocorrências via busca textual.
+4. `call_graph`: chamadores diretos (`callers`) e funções chamadas (`callees`).
+5. `diff_impact`: *Contract Drift* de símbolos exportados (sem locais e sem testes) alterados na janela.
+6. `blast_radius`: impacto direto, transitivo, testes afetados e impactos cruzados entre repositórios.
+7. `affected`: seleção determinística de testes impactados por arquivos alterados.
+8. `search` / `search_symbols`: busca híbrida; responde com `via` (`indice` / `busca_textual` / `nenhum`) e o motivo quando não acha.
+9. `index_health`: shards, WAL, idade do índice por arquivo (`file` para um arquivo só) e tokens economizados.
+10. `nexus_ingest_vault`, `nexus_query_sheet`, `nexus_audit_dlp` (só no servidor completo).
+
+### `.kvxignore`
+Caminhos que nenhuma ferramenta pode indexar nem ler, inclusive as `nexus_*`: um `.kvxignore` na raiz do repo (sintaxe do `.gitignore`) e um global em `~/.kvx/kvxignore` (aceita caminhos absolutos). A recusa cita o arquivo, a linha e a regra.
 
 ---
 
