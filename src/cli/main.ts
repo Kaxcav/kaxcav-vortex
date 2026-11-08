@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ContextFidelity } from '../core/types.ts'
+import { DriveAppServer } from '../drive-app/server.ts'
 import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../engine.ts'
 import { VortexMcpServer } from '../mcp/server.ts'
 import { VortexDashboardServer } from '../ui/server.ts'
@@ -143,7 +144,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         '  kvx diff-impact --index <path> [--minutes 60]     Detect breaking signature Contract Drift',
         '  kvx federate [--repos <p1,p2,...>]                Discover cross-repo REST/model/symbol links',
         '  kvx dashboard [--port 7788]                       Launch Web Workbench UI on 127.0.0.1:7788',
-        '  kvx serve --mcp                                   Start JSON-RPC 2.0 MCP server over stdio',
+        '  kvx serve --mcp [--read-only]                     Start JSON-RPC 2.0 MCP server over stdio (--read-only: kaxcav-vortex-ro, code tools only)',
         '  kvx bench                                         Run performance & accuracy benchmark suite',
         '',
       ].join('\n'),
@@ -240,6 +241,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           ifNoneMatch,
           deltaFrom,
           includeFederation: Boolean(flags.federate),
+          path: flags.path ? String(flags.path) : undefined,
+          corpus: flags.corpus ? String(flags.corpus) : undefined,
         })
 
         if (format === 'json') {
@@ -254,7 +257,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         const repoPath = resolve(String(flags.index ?? flags.repo ?? process.cwd()))
         const query = String(flags.query ?? positional.join(' '))
         const limit = Number(flags.limit ?? 15)
-        const hits = engine.search(repoPath, query, limit)
+        const path = flags.path ? String(flags.path) : undefined
+        const corpus = flags.corpus ? String(flags.corpus) : undefined
+        const hits = engine.search(repoPath, query, { limit, path, corpus })
         if (flags.json) {
           process.stdout.write(JSON.stringify(hits, null, 2) + '\n')
         } else {
@@ -290,7 +295,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       case 'outline': {
         const repoPath = resolve(String(flags.index ?? flags.repo ?? process.cwd()))
         const file = String(flags.file ?? positional[0] ?? '')
-        const res = engine.fileOutline(repoPath, file)
+        const scope = flags.escopo ? (String(flags.escopo) as 'topo' | 'exportado' | 'tudo') : undefined
+        const res = engine.fileOutline(repoPath, file, { scope })
         process.stdout.write(JSON.stringify(res, null, 2) + '\n')
         return 0
       }
@@ -298,9 +304,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       case 'symbol': {
         const repoPath = resolve(String(flags.index ?? flags.repo ?? process.cwd()))
         const sym = String(flags.symbol ?? positional[0] ?? '')
-        const res = engine.readSymbol(repoPath, sym)
-        process.stdout.write(JSON.stringify(res, null, 2) + '\n')
-        return 0
+        const res = engine.readSymbolDetailed(repoPath, sym, { path: flags.path ? String(flags.path) : undefined })
+        process.stdout.write(JSON.stringify(res.matches.length > 0 ? res.matches : res, null, 2) + '\n')
+        return res.matches.length > 0 ? 0 : 1
       }
 
       case 'callers': {
@@ -334,9 +340,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
 
       case 'serve':
       case 'mcp': {
-        const mcp = new VortexMcpServer(engine)
+        // --read-only: server `kaxcav-vortex-ro` with only the code-reading tools (no nexus_*)
+        const mcp = new VortexMcpServer(engine, undefined, { readOnly: Boolean(flags['read-only']) })
         mcp.startStdio()
-        return new Promise<number>(() => {})
+        return await new Promise<number>(() => {})
       }
 
       case 'daemon': {
@@ -360,7 +367,47 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         const dash = new VortexDashboardServer(engine)
         const info = await dash.start(port)
         process.stdout.write(`Kaxcav Vortex Workbench listening at ${info.url}\n`)
-        return new Promise<number>(() => {})
+        return await new Promise<number>(() => {})
+      }
+
+      case 'drive':
+      case 'drive-app': {
+        const port = Number(flags.port ?? 4777)
+        const driveApp = new DriveAppServer(engine)
+        const info = await driveApp.start(port)
+        process.stdout.write(`Drive Nexus app listening at ${info.url}\n`)
+        return await new Promise<number>(() => {})
+      }
+
+      case 'nexus': {
+        const sub = positional[0] ?? 'list'
+        if (sub === 'ingest') {
+          const sourceDir = resolve(String(flags.source ?? flags.dir ?? positional[1] ?? process.cwd()))
+          const name = String(flags.name ?? positional[2] ?? 'Drive Nexus Vault')
+          const res = engine.nexus.ingestDirectory({
+            name,
+            sourceDir,
+            tenantSlug: flags.tenant ? String(flags.tenant) : undefined,
+          })
+          process.stdout.write(JSON.stringify(res, null, 2) + '\n')
+          return 0
+        }
+        if (sub === 'drive-sync') {
+          const folder = String(flags.folder ?? positional[1] ?? '')
+          const name = String(flags.name ?? positional[2] ?? 'Google Drive Sync')
+          const res = await engine.nexus.syncGoogleDriveWorkspace({
+            name,
+            folderIdOrUrl: folder,
+            accessToken: flags.token ? String(flags.token) : undefined,
+            apiKey: flags['api-key'] ? String(flags['api-key']) : undefined,
+            maxFiles: flags.max ? Number(flags.max) : 120,
+          })
+          process.stdout.write(JSON.stringify(res, null, 2) + '\n')
+          return 0
+        }
+        const workspaces = engine.nexus.listWorkspaces()
+        process.stdout.write(JSON.stringify({ workspaces }, null, 2) + '\n')
+        return 0
       }
 
       default: {
@@ -369,7 +416,14 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       }
     }
   } finally {
-    if (command !== 'serve' && command !== 'mcp') {
+    if (
+      command !== 'serve' &&
+      command !== 'mcp' &&
+      command !== 'dashboard' &&
+      command !== 'ui' &&
+      command !== 'drive' &&
+      command !== 'drive-app'
+    ) {
       engine.close()
     }
   }

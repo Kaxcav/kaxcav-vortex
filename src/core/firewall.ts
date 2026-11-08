@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, openSync, readFileSync, readdirSync, readSync, closeSync, statSync } from 'node:fs'
 import { extname, join, relative, resolve, sep } from 'node:path'
 import type { ScannedFile, SupportedLanguage } from './types.ts'
+import { checkKvxIgnore } from './kvxignore.ts'
 
 const ALWAYS_EXCLUDED_DIRS = new Set([
   '.git',
@@ -171,6 +172,8 @@ export interface FileFingerprint {
 export class AdmissionFirewall {
   readonly maxFileBytes: number
   private readonly customExcludedPrefixes: string[] = []
+  /** Content-probe verdicts keyed by absolute path, reused while mtime and size are unchanged. */
+  private readonly probeCache = new Map<string, { mtimeMs: number; size: number; ok: boolean }>()
 
   constructor(repoPath: string, options: FirewallOptions = {}) {
     this.maxFileBytes = options.maxFileBytes ?? 524_288 // 512 KB hard ceiling
@@ -208,9 +211,13 @@ export class AdmissionFirewall {
   }
 
   private isExcludedRelPath(relPosix: string, dirName: string): boolean {
-    if (ALWAYS_EXCLUDED_DIRS.has(dirName)) return true
-    if (dirName.startsWith('.playwright-artifacts-')) return true
-    if (dirName.startsWith('.daemon-state')) return true
+    return this.exclusionReason(relPosix, dirName) !== null
+  }
+
+  private exclusionReason(relPosix: string, dirName: string): string | null {
+    if (ALWAYS_EXCLUDED_DIRS.has(dirName)) return `pasta '${dirName}' sempre excluída do índice`
+    if (dirName.startsWith('.playwright-artifacts-')) return `pasta '${dirName}' excluída do índice`
+    if (dirName.startsWith('.daemon-state')) return `pasta '${dirName}' excluída do índice`
 
     const lowerRel = relPosix.toLowerCase()
     for (const prefix of this.customExcludedPrefixes) {
@@ -220,13 +227,46 @@ export class AdmissionFirewall {
         lowerRel.endsWith('/' + prefix) ||
         lowerRel.includes('/' + prefix + '/')
       ) {
-        return true
+        return `excluído pela regra '${prefix}' do .kvx.yaml`
       }
     }
-    return false
+    return null
   }
 
-  private detectLanguage(fileName: string): SupportedLanguage | null {
+  /**
+   * Explains why a repository-relative file is not (or would not be) indexed.
+   * Returns null when the file is admissible.
+   */
+  explainExclusion(repoPath: string, relPosix: string): string | null {
+    const root = resolve(repoPath)
+    const absPath = join(root, ...relPosix.split('/'))
+    if (!existsSync(absPath)) return 'arquivo não existe no disco'
+    const parts = relPosix.split('/')
+    for (let i = 0; i < parts.length; i++) {
+      const sub = parts.slice(0, i + 1).join('/')
+      const reason = this.exclusionReason(sub, parts[i])
+      if (reason) return reason
+      if (i < parts.length - 1 && AdmissionFirewall.isNestedWorktree(join(root, ...parts.slice(0, i + 1)), sub)) {
+        return `dentro de '${sub}', um worktree/submódulo aninhado (cópia do código, fora do índice)`
+      }
+    }
+    const ignore = checkKvxIgnore(absPath)
+    if (ignore.ignored) return `bloqueado por .kvxignore (regra '${ignore.pattern}' em ${ignore.source}:${ignore.line})`
+    const lang = this.detectLanguage(parts[parts.length - 1])
+    if (!lang) return `extensão não indexada ('${extname(relPosix) || parts[parts.length - 1]}')`
+    let size = 0
+    try {
+      size = statSync(absPath).size
+    } catch {
+      return 'arquivo ilegível'
+    }
+    if (size <= 0) return 'arquivo vazio'
+    if (size > this.maxFileBytes) return `arquivo maior que o limite de indexação (${size} > ${this.maxFileBytes} bytes)`
+    if (!this.passesMagicAndMinifiedCheck(absPath, size)) return 'conteúdo binário, minificado ou de linha única muito longa'
+    return null
+  }
+
+  static detectLanguage(fileName: string): SupportedLanguage | null {
     const lower = fileName.toLowerCase()
     if (
       lower.endsWith('.min.js') ||
@@ -242,6 +282,10 @@ export class AdmissionFirewall {
     const ext = extname(lower)
     if (BLOCKED_EXTENSIONS.has(ext)) return null
     return EXTENSION_LANGUAGE_MAP[ext] ?? null
+  }
+
+  detectLanguage(fileName: string): SupportedLanguage | null {
+    return AdmissionFirewall.detectLanguage(fileName)
   }
 
   private passesMagicAndMinifiedCheck(absPath: string, byteSize: number): boolean {
@@ -299,6 +343,21 @@ export class AdmissionFirewall {
     }
   }
 
+  /**
+   * Nested git worktrees / submodules (a directory holding a `.git` FILE) and agent
+   * worktrees under `.claude/worktrees` are copies of the code: indexing them duplicates
+   * every symbol and multiplies indexing time.
+   */
+  static isNestedWorktree(absDir: string, relPosix: string): boolean {
+    const lower = relPosix.toLowerCase()
+    if (lower === '.claude/worktrees' || lower.endsWith('/.claude/worktrees')) return true
+    try {
+      return statSync(join(absDir, '.git')).isFile()
+    } catch {
+      return false
+    }
+  }
+
   discoverFingerprints(repoPath: string): FileFingerprint[] {
     const root = resolve(repoPath)
     const results: FileFingerprint[] = []
@@ -318,7 +377,11 @@ export class AdmissionFirewall {
         const relPosix = relative(root, absPath).split(sep).join('/')
 
         if (entry.isDirectory()) {
-          if (!this.isExcludedRelPath(relPosix, entry.name)) {
+          if (
+            !this.isExcludedRelPath(relPosix, entry.name) &&
+            !AdmissionFirewall.isNestedWorktree(absPath, relPosix) &&
+            !checkKvxIgnore(absPath, true).ignored
+          ) {
             stack.push(absPath)
           }
           continue
@@ -329,6 +392,7 @@ export class AdmissionFirewall {
 
         const lang = this.detectLanguage(entry.name)
         if (!lang) continue
+        if (checkKvxIgnore(absPath, false).ignored) continue
 
         let st
         try {
@@ -337,12 +401,21 @@ export class AdmissionFirewall {
           continue
         }
 
-        if (!this.passesMagicAndMinifiedCheck(absPath, st.size)) continue
+        const mtimeMs = Math.trunc(st.mtimeMs)
+        const cachedProbe = this.probeCache.get(absPath)
+        let admissible: boolean
+        if (cachedProbe && cachedProbe.mtimeMs === mtimeMs && cachedProbe.size === st.size) {
+          admissible = cachedProbe.ok
+        } else {
+          admissible = this.passesMagicAndMinifiedCheck(absPath, st.size)
+          this.probeCache.set(absPath, { mtimeMs, size: st.size, ok: admissible })
+        }
+        if (!admissible) continue
 
         results.push({
           absPath,
           relPath: relPosix,
-          mtimeMs: Math.trunc(st.mtimeMs),
+          mtimeMs,
           byteSize: st.size,
           lang,
         })

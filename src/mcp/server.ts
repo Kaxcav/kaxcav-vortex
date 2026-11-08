@@ -1,5 +1,8 @@
 import { createInterface } from 'node:readline'
+import { resolve } from 'node:path'
 import { KaxcavVortexEngine, KAXCAV_VORTEX_VERSION } from '../engine.ts'
+import { KvxIgnoreError } from '../core/kvxignore.ts'
+import type { OutlineScope } from '../storage/shard.ts'
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -8,341 +11,304 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>
 }
 
+type JsonRecord = Record<string, unknown>
+
+interface ToolDef {
+  name: string
+  description: string
+  inputSchema: JsonRecord
+  /** K8 — part of the read-only server: reads only the indexed repository code. */
+  readOnly?: boolean
+}
+
+const str = { type: 'string' }
+const num = { type: 'number' }
+
+export const TOOL_DEFS: ToolDef[] = [
+  {
+    name: 'context',
+    readOnly: true,
+    description:
+      'Build a surgical, token-budgeted context pack (L0-L3 fidelity + PPR-HD graph ranking + ETag delta deduplication).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Absolute repository path' },
+        task: { type: 'string', description: 'Task or question description' },
+        budget: { type: 'number', description: 'Token budget (default 2000)' },
+        fidelity: { type: 'string', enum: ['full', 'graded', 'compact'] },
+        path: str,
+        corpus: str,
+        if_none_match: str,
+        delta_from: str,
+      },
+      required: ['repo', 'task'],
+    },
+  },
+  {
+    name: 'search',
+    readOnly: true,
+    description:
+      'Hybrid BM25F + AST symbol search. `path` accepts absolute or repo-relative paths. Never answers a bare empty list: returns `via` (indice | busca_textual | nenhum), the reason, and text-search hits when the index has none. Local symbols only appear for an exact-name query.',
+    inputSchema: { type: 'object', properties: { repo: str, query: str, path: str, corpus: str, limit: num }, required: ['query'] },
+  },
+  {
+    name: 'search_symbols',
+    readOnly: true,
+    description: 'Same as `search` (polyglot symbol and document search), with explicit reason and text fallback.',
+    inputSchema: { type: 'object', properties: { repo: str, query: str, corpus: str, path: str, limit: num }, required: ['query'] },
+  },
+  {
+    name: 'affected',
+    readOnly: true,
+    description: 'Compute affected test files for modified source files.',
+    inputSchema: { type: 'object', properties: { repo: str, files: { type: 'array', items: str } }, required: ['repo', 'files'] },
+  },
+  {
+    name: 'blast_radius',
+    readOnly: true,
+    description: 'Compute direct callers, transitive impact files, affected tests, and cross-repo impacts.',
+    inputSchema: { type: 'object', properties: { repo: str, target: str }, required: ['repo', 'target'] },
+  },
+  {
+    name: 'index_health',
+    readOnly: true,
+    description:
+      'Shard health (files, symbols, DB and WAL size, index age per file), memory and token savings. With `file`, returns that file\'s index age and whether the disk copy is newer.',
+    inputSchema: { type: 'object', properties: { repo: str, file: str } },
+  },
+  {
+    name: 'file_outline',
+    readOnly: true,
+    description:
+      'Structural skeleton of a file with real line ranges (from the declaration\'s closing token). `escopo`: topo (default: module declarations + class members, no locals), exportado, tudo. Absolute or relative path. If the file is not indexed, returns `found:false` with the reason and similar files.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, file: str, escopo: { type: 'string', enum: ['topo', 'exportado', 'tudo'] } },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'read_symbol',
+    readOnly: true,
+    description:
+      'Exact source slice of a symbol. Accepts `name`, `Class.method`, `path#name`; optional `path` narrows the file. Class methods, getters and fields are indexed. When nothing matches, returns the reason, similar names and text-search occurrences.',
+    inputSchema: { type: 'object', properties: { repo: str, symbol: str, path: str }, required: ['symbol'] },
+  },
+  {
+    name: 'call_graph',
+    readOnly: true,
+    description: 'Return direct callers and callees of a symbol.',
+    inputSchema: { type: 'object', properties: { repo: str, symbol: str }, required: ['symbol'] },
+  },
+  {
+    name: 'diff_impact',
+    readOnly: true,
+    description:
+      'Recently modified files, breaking contract drift of EXPORTED symbols (no locals, no tests) changed in the window, affected callers and tests.',
+    inputSchema: { type: 'object', properties: { repo: str, window_minutes: num } },
+  },
+  {
+    name: 'nexus_ingest_vault',
+    description:
+      'Zero-Data-Loss ingestion of a directory or Google Drive mirror (.xlsx, .docx, .pdf, .zip, AppsScript .json, .csv, .sql, .md) with DLP secret redaction and authority conflict detection. Paths blocked by .kvxignore are refused.',
+    inputSchema: { type: 'object', properties: { name: str, source_dir: str, tenant_slug: str }, required: ['name', 'source_dir'] },
+  },
+  {
+    name: 'nexus_query_sheet',
+    description: 'Query spreadsheet tabs, columns, formulas, validations, and tabular rows extracted by Drive Nexus.',
+    inputSchema: {
+      type: 'object',
+      properties: { workspace_id: str, sheet_title: str, column_filter: str, limit: num },
+      required: ['workspace_id'],
+    },
+  },
+  {
+    name: 'nexus_audit_dlp',
+    description: 'Return forensic DLP secret/credential redactions and Authority Conflict Radar for a Drive Nexus workspace.',
+    inputSchema: { type: 'object', properties: { workspace_id: str }, required: ['workspace_id'] },
+  },
+]
+
+export const READ_ONLY_TOOL_NAMES: readonly string[] = TOOL_DEFS.filter((t) => t.readOnly).map((t) => t.name)
+
+export interface McpServerOptions {
+  /** K8 — expose only the read-only code tools (server name `kaxcav-vortex-ro`, no nexus_*). */
+  readOnly?: boolean
+}
+
 export class VortexMcpServer {
   private readonly engine: KaxcavVortexEngine
   private readonly writeLine: (line: string) => void
+  private readonly readOnly: boolean
 
   constructor(
     engine = new KaxcavVortexEngine(),
     writeLine: (line: string) => void = (line) => process.stdout.write(line + '\n'),
+    options: McpServerOptions = {},
   ) {
     this.engine = engine
     this.writeLine = writeLine
+    this.readOnly = Boolean(options.readOnly)
   }
 
   startStdio(): void {
-    const rl = createInterface({
-      input: process.stdin,
-      terminal: false,
-    })
-
+    const rl = createInterface({ input: process.stdin, terminal: false })
     rl.on('line', (line) => {
       const trimmed = line.trim()
       if (!trimmed || trimmed.startsWith('Content-Length:')) return
+      let msg: JsonRpcRequest
       try {
-        const msg = JSON.parse(trimmed) as JsonRpcRequest
-        this.handleRequest(msg)
+        msg = JSON.parse(trimmed) as JsonRpcRequest
       } catch {
-        // Ignore non-JSON framing lines
+        return // non-JSON framing line
       }
+      this.handleRequest(msg)
     })
   }
 
-  public handleRequest(req: JsonRpcRequest): Record<string, unknown> | null {
+  public handleRequest(req: JsonRpcRequest): JsonRecord | null {
     const { id, method, params = {} } = req
-
     try {
       switch (method) {
-        case 'initialize': {
+        case 'initialize':
           return this.respond(id, {
             protocolVersion: '2024-11-05',
-            serverInfo: {
-              name: 'kaxcav-vortex',
-              version: KAXCAV_VORTEX_VERSION,
-            },
-            capabilities: {
-              tools: {},
-            },
+            serverInfo: { name: this.readOnly ? 'kaxcav-vortex-ro' : 'kaxcav-vortex', version: KAXCAV_VORTEX_VERSION },
+            capabilities: { tools: {} },
           })
-        }
-
         case 'notifications/initialized':
           return null
-
-        case 'tools/list': {
+        case 'tools/list':
           return this.respond(id, {
-            tools: [
-              {
-                name: 'context',
-                description:
-                  'Build a surgical, token-budgeted context pack (L0-L3 fidelity + PPR-HD graph ranking + ETag delta deduplication).',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string', description: 'Absolute repository path' },
-                    task: { type: 'string', description: 'Task or question description' },
-                    budget: { type: 'number', description: 'Token budget (default 2000)' },
-                    fidelity: {
-                      type: 'string',
-                      enum: ['full', 'graded', 'compact'],
-                      description: 'Slice fidelity mode',
-                    },
-                    if_none_match: { type: 'string', description: 'Previous pack ETag' },
-                    delta_from: { type: 'string', description: 'Prior pack ETag for delta mode' },
-                  },
-                  required: ['repo', 'task'],
-                },
-              },
-              {
-                name: 'search',
-                description: 'Hybrid BM25F + AST symbol search in a repository shard.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    query: { type: 'string' },
-                    limit: { type: 'number' },
-                  },
-                  required: ['query'],
-                },
-              },
-              {
-                name: 'search_symbols',
-                description: 'Polyglot symbol and document search tool across repository shards.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    query: { type: 'string' },
-                    corpus: { type: 'string' },
-                    path: { type: 'string' },
-                    limit: { type: 'number' },
-                  },
-                  required: ['query'],
-                },
-              },
-              {
-                name: 'affected',
-                description: 'Compute affected test files for modified source files.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    files: { type: 'array', items: { type: 'string' } },
-                  },
-                  required: ['repo', 'files'],
-                },
-              },
-              {
-                name: 'blast_radius',
-                description:
-                  'Compute direct callers, transitive impact files, affected tests, and cross-repo impacts.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    target: { type: 'string' },
-                  },
-                  required: ['repo', 'target'],
-                },
-              },
-              {
-                name: 'index_health',
-                description: 'Return shard health, memory usage, and token savings telemetry.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                  },
-                },
-              },
-              {
-                name: 'file_outline',
-                description:
-                  'Return the complete structural symbol skeleton of a file in ~40 tokens without reading the full file body.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    file: { type: 'string' },
-                  },
-                  required: ['file'],
-                },
-              },
-              {
-                name: 'read_symbol',
-                description:
-                  'Read the exact source slice and signature of a single symbol/function/method without loading the entire file.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    symbol: { type: 'string' },
-                  },
-                  required: ['symbol'],
-                },
-              },
-              {
-                name: 'call_graph',
-                description: 'Return direct callers and callees of a symbol.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    symbol: { type: 'string' },
-                  },
-                  required: ['symbol'],
-                },
-              },
-              {
-                name: 'diff_impact',
-                description:
-                  'Analyze recently modified files, detect breaking signature/contract drift, and list affected callers and tests.',
-                inputSchema: {
-                  type: 'object',
-                  properties: {
-                    repo: { type: 'string' },
-                    window_minutes: { type: 'number' },
-                  },
-                },
-              },
-            ],
+            tools: TOOL_DEFS.filter((t) => !this.readOnly || t.readOnly).map(({ readOnly: _ro, ...t }) => t),
           })
-        }
-
         case 'tools/call': {
           const toolName = String(params.name ?? '')
-          const args = (params.arguments ?? {}) as Record<string, unknown>
+          const args = (params.arguments ?? {}) as JsonRecord
+          if (this.readOnly && !READ_ONLY_TOOL_NAMES.includes(toolName)) {
+            return this.respondError(id, -32602, `Ferramenta '${toolName}' não está disponível no servidor só de leitura`)
+          }
           return this.handleToolCall(id, toolName, args)
         }
-
         default:
           return this.respondError(id, -32601, `Method not found: ${method}`)
       }
     } catch (err) {
+      if (err instanceof KvxIgnoreError) {
+        return this.respond(id, { content: [{ type: 'text', text: `Recusado: ${err.message}` }], isError: true })
+      }
       return this.respondError(id, -32603, err instanceof Error ? err.message : String(err))
     }
   }
 
-  private handleToolCall(
-    id: string | number | null | undefined,
-    name: string,
-    args: Record<string, unknown>,
-  ): Record<string, unknown> {
+  private text(id: string | number | null | undefined, payload: unknown, extra: JsonRecord = {}): JsonRecord {
+    const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+    return this.respond(id, { content: [{ type: 'text', text }], ...extra })
+  }
+
+  private repoArg(args: JsonRecord): string {
+    return String(args.repo ?? args.index ?? process.cwd())
+  }
+
+  private handleToolCall(id: string | number | null | undefined, name: string, args: JsonRecord): JsonRecord {
     switch (name) {
       case 'context': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const task = String(args.task ?? '')
-        const budget = Number(args.budget ?? args.token_budget ?? 2000)
-        const fidelity = (args.fidelity as 'full' | 'graded' | 'compact') ?? 'graded'
+        const repo = this.repoArg(args)
+        if (args.path) {
+          const p = String(args.path)
+          this.engine.assertPathAllowed(/^(?:[A-Za-z]:[\\/]|\/)/.test(p) ? p : resolve(repo, p))
+        }
         const pack = this.engine.context({
           repositoryPath: repo,
-          task,
-          tokenBudget: budget,
-          fidelity,
+          task: String(args.task ?? ''),
+          tokenBudget: Number(args.budget ?? args.token_budget ?? 2000),
+          fidelity: (args.fidelity as 'full' | 'graded' | 'compact') ?? 'graded',
+          path: args.path ? String(args.path) : undefined,
+          corpus: args.corpus ? String(args.corpus) : undefined,
           ifNoneMatch: args.if_none_match ? String(args.if_none_match) : undefined,
           deltaFrom: args.delta_from ? String(args.delta_from) : undefined,
         })
         return this.respond(id, {
           content: [{ type: 'text', text: pack.markdown }],
-          meta: {
-            etag: pack.etag,
-            tokens: pack.tokenCount,
-            tokensSaved: pack.tokensSaved,
-            elapsedMs: pack.elapsedMs,
-          },
+          meta: { etag: pack.etag, tokens: pack.tokenCount, tokensSaved: pack.tokensSaved, elapsedMs: pack.elapsedMs },
         })
       }
-
       case 'search':
       case 'search_symbols': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const query = String(args.query ?? '')
-        const limit = Number(args.limit ?? 15)
-        const hits = this.engine.search(repo, query, limit)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify({ results: hits, total: hits.length }, null, 2) }],
-          structuredContent: { results: hits, total: hits.length },
+        const res = this.engine.searchDetailed(this.repoArg(args), String(args.query ?? ''), {
+          limit: Number(args.limit ?? 15),
+          path: args.path ? String(args.path) : undefined,
+          corpus: args.corpus ? String(args.corpus) : undefined,
         })
+        return this.text(id, res, { structuredContent: res })
       }
-
       case 'affected': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
         const files = Array.isArray(args.files) ? args.files.map(String) : []
-        const tests = this.engine.affected(repo, files)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify({ tests }, null, 2) }],
-        })
+        return this.text(id, { tests: this.engine.affected(this.repoArg(args), files) })
       }
-
-      case 'blast_radius': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const target = String(args.target ?? '')
-        const report = this.engine.blastRadius(repo, target)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(report, null, 2) }],
-        })
-      }
-
-      case 'index_health': {
-        const repos = args.repo ? [String(args.repo)] : undefined
-        const status = this.engine.status(repos)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(status, null, 2) }],
-        })
-      }
-
+      case 'blast_radius':
+        return this.text(id, this.engine.blastRadius(this.repoArg(args), String(args.target ?? '')))
+      case 'index_health':
+        if (args.file) return this.text(id, this.engine.fileIndexAge(this.repoArg(args), String(args.file)))
+        return this.text(id, this.engine.status(args.repo ? [String(args.repo)] : undefined))
       case 'file_outline': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const file = String(args.file ?? args.path ?? '')
-        const outline = this.engine.fileOutline(repo, file)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(outline, null, 2) }],
-        })
+        const scope = (args.escopo ?? args.scope) as OutlineScope | undefined
+        return this.text(id, this.engine.fileOutline(this.repoArg(args), String(args.file ?? args.path ?? ''), { scope }))
       }
-
       case 'read_symbol': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const symbol = String(args.symbol ?? args.name ?? '')
-        const matches = this.engine.readSymbol(repo, symbol)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(matches, null, 2) }],
+        const res = this.engine.readSymbolDetailed(this.repoArg(args), String(args.symbol ?? args.name ?? ''), {
+          path: args.path ? String(args.path) : undefined,
+        })
+        return this.text(id, res.matches.length > 0 ? res.matches : res)
+      }
+      case 'call_graph':
+        return this.text(id, this.engine.callGraph(this.repoArg(args), String(args.symbol ?? args.name ?? '')))
+      case 'diff_impact':
+        return this.text(id, this.engine.diffImpact(this.repoArg(args), Number(args.window_minutes ?? 60)))
+      case 'nexus_ingest_vault': {
+        const sourceDir = resolve(String(args.source_dir ?? process.cwd()))
+        this.engine.assertPathAllowed(sourceDir)
+        return this.text(
+          id,
+          this.engine.nexus.ingestDirectory({
+            name: String(args.name ?? 'Enterprise Drive Vault'),
+            sourceDir,
+            tenantSlug: args.tenant_slug ? String(args.tenant_slug) : undefined,
+          }),
+        )
+      }
+      case 'nexus_query_sheet':
+        return this.text(
+          id,
+          this.engine.nexus.querySheetRows({
+            workspaceId: String(args.workspace_id ?? ''),
+            sheetTitle: args.sheet_title ? String(args.sheet_title) : undefined,
+            columnFilter: args.column_filter ? String(args.column_filter) : undefined,
+            limit: args.limit ? Number(args.limit) : 50,
+          }),
+        )
+      case 'nexus_audit_dlp': {
+        const workspaceId = String(args.workspace_id ?? '')
+        return this.text(id, {
+          dlpFindings: this.engine.nexus.listDlpFindings(workspaceId),
+          authorityConflicts: this.engine.nexus.listAuthorityConflicts(workspaceId),
         })
       }
-
-      case 'call_graph': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const symbol = String(args.symbol ?? args.name ?? '')
-        const cg = this.engine.callGraph(repo, symbol)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(cg, null, 2) }],
-        })
-      }
-
-      case 'diff_impact': {
-        const repo = String(args.repo ?? args.index ?? process.cwd())
-        const mins = Number(args.window_minutes ?? 60)
-        const impact = this.engine.diffImpact(repo, mins)
-        return this.respond(id, {
-          content: [{ type: 'text', text: JSON.stringify(impact, null, 2) }],
-        })
-      }
-
       default:
         return this.respondError(id, -32602, `Unknown tool: ${name}`)
     }
   }
 
-  private respond(
-    id: string | number | null | undefined,
-    result: Record<string, unknown>,
-  ): Record<string, unknown> {
+  private respond(id: string | number | null | undefined, result: JsonRecord): JsonRecord {
     const payload = { jsonrpc: '2.0', id: id ?? null, result }
-    if (id !== undefined) {
-      this.writeLine(JSON.stringify(payload))
-    }
+    if (id !== undefined) this.writeLine(JSON.stringify(payload))
     return payload
   }
 
-  private respondError(
-    id: string | number | null | undefined,
-    code: number,
-    message: string,
-  ): Record<string, unknown> {
+  private respondError(id: string | number | null | undefined, code: number, message: string): JsonRecord {
     const payload = { jsonrpc: '2.0', id: id ?? null, error: { code, message } }
-    if (id !== undefined) {
-      this.writeLine(JSON.stringify(payload))
-    }
+    if (id !== undefined) this.writeLine(JSON.stringify(payload))
     return payload
   }
 }
