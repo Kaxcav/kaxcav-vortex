@@ -20,6 +20,7 @@ import { checkKvxIgnore, describeKvxIgnoreBlock, KvxIgnoreError, normalizeFsPath
 import { MultiRepoFederator } from './federation/federator.ts'
 import { DriveNexusVault } from './nexus/vault.ts'
 import { SubmodularPacker } from './packer/packer.ts'
+import { treeSitterStatus } from './parser/treesitter.ts'
 import { RepositoryShard, type OutlineScope, type SymbolSlice, type TextHit } from './storage/shard.ts'
 
 /**
@@ -58,8 +59,14 @@ export class KaxcavVortexEngine {
   private readonly federator = new MultiRepoFederator()
   private readonly telemetryDb: DatabaseSync
   private cachedFederationLinks: FederationLink[] = []
+  /**
+   * An engine on an explicit storage root (tests, embedders) stays isolated: it does not
+   * pick up the user's ~/.kvx/config.yaml repos, which status()/bench would then open and sync.
+   */
+  private readonly readsGlobalConfig: boolean
 
   constructor(storageRoot?: string) {
+    this.readsGlobalConfig = storageRoot === undefined
     this.storageRoot = resolve(
       storageRoot ?? process.env.KVX_HOME ?? join(homedir(), '.kaxcav-vortex'),
     )
@@ -166,7 +173,7 @@ export class KaxcavVortexEngine {
       .all() as Array<{ repo_path: string }>
     for (const r of rows) addIfValid(r.repo_path)
 
-    for (const cfgFile of [join(homedir(), '.kvx', 'config.yaml')]) {
+    for (const cfgFile of this.readsGlobalConfig ? [join(homedir(), '.kvx', 'config.yaml')] : []) {
       if (existsSync(cfgFile)) {
         try {
           const raw = readFileSync(cfgFile, 'utf8')
@@ -464,6 +471,7 @@ export class KaxcavVortexEngine {
       rss_bytes: mem.rss,
       shards: shardHealths,
       federationEdges: this.cachedFederationLinks.length,
+      parsers: { treeSitter: treeSitterStatus() },
       telemetry: {
         totalQueries: tRow.totalQueries,
         totalTokensReturned: tRow.totalReturned,

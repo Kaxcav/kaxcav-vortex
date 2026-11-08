@@ -9,7 +9,30 @@ export type SupportedLanguage =
   | 'json'
   | 'yaml'
   | 'powershell'
+  | 'java'
+  | 'csharp'
+  | 'cpp'
+  | 'rust'
+  | 'ruby'
+  | 'php'
+  | 'bash'
   | 'other'
+
+/** Languages treated as source code (slop scan, `corpus: code`). */
+export const CODE_LANGUAGES: ReadonlySet<string> = new Set([
+  'typescript',
+  'javascript',
+  'python',
+  'go',
+  'powershell',
+  'java',
+  'csharp',
+  'cpp',
+  'rust',
+  'ruby',
+  'php',
+  'bash',
+])
 
 export type SymbolKind =
   | 'class'
@@ -24,6 +47,7 @@ export type SymbolKind =
   | 'model'
   | 'table'
   | 'section'
+  | 'namespace'
 
 export type EdgeKind =
   | 'imports'
@@ -295,6 +319,8 @@ export interface EngineStatus {
   rss_bytes: number
   shards: ShardHealth[]
   federationEdges: number
+  /** Optional tree-sitter layer: which languages it covers, or why it is off. */
+  parsers?: { treeSitter: { ready: boolean; languages: string[]; reason?: string; version?: string } }
   telemetry: {
     totalQueries: number
     totalTokensReturned: number

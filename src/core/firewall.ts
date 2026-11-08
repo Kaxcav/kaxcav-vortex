@@ -143,6 +143,21 @@ const EXTENSION_LANGUAGE_MAP: Record<string, SupportedLanguage> = {
   '.yml': 'yaml',
   '.ps1': 'powershell',
   '.psm1': 'powershell',
+  '.java': 'java',
+  '.cs': 'csharp',
+  '.c': 'cpp',
+  '.h': 'cpp',
+  '.cc': 'cpp',
+  '.cpp': 'cpp',
+  '.cxx': 'cpp',
+  '.hh': 'cpp',
+  '.hpp': 'cpp',
+  '.hxx': 'cpp',
+  '.rs': 'rust',
+  '.rb': 'ruby',
+  '.php': 'php',
+  '.sh': 'bash',
+  '.bash': 'bash',
 }
 
 const MAGIC_SIGNATURES: Array<{ bytes: number[]; name: string }> = [

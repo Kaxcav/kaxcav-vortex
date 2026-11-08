@@ -50,6 +50,7 @@ flowchart LR
 | :--- | :--- |
 | **`AdmissionFirewall` ([src/core/firewall.ts](./src/core/firewall.ts))** | Inspeciona os primeiros `4.096 bytes` de cada arquivo candidato e bloqueia na largada PDFs (`%PDF-`), ZIP/Office (`PK\x03\x04`), binários PE/ELF (`MZ`), SQLite, bytes nulos (`0x00`) e bundles minificados (`> 1.400 chars/linha`). Independe da existência de `.git`. |
 | **`CodeStateMachine` & `PolyglotExtractor` ([src/parser/](./src/parser/))** | Scanner léxico de estados (`Code`, `LineComment`, `BlockComment`, `SingleQuote`, `DoubleQuote`, `TemplateQuote`) imune a chaves `{}` dentro de strings/comentários, com suporte a tipos de retorno inline e assinaturas multi-linha em TypeScript/JS, Go, Python, Prisma/SQL e Markdown. |
+| **Camada tree-sitter opcional ([src/parser/treesitter.ts](./src/parser/treesitter.ts))** | Com o pacote opcional `@vscode/tree-sitter-wasm` (WASM, sem binário nativo nem node-gyp), Python e Go passam a ser lidos pela árvore sintática e entram Java, C#, C/C++, Rust, Ruby, PHP, Bash e PowerShell, com membros qualificados (`Classe.metodo`), visibilidade, docs e imports de módulo (`com.acme.Invoice`, `crate::db`, `App\Models`) resolvidos para arquivos. Sem o pacote, ou com `KVX_TREE_SITTER=0`, o motor segue com os extratores próprios; `index_health`/`kvx status --json` dizem qual camada está ativa e por quê. TS/JS continuam no scanner próprio. |
 | **`RepositoryShard` ([src/storage/shard.ts](./src/storage/shard.ts))** | 1 banco SQLite nativo (`node:sqlite`) isolado por repositório com trava física de WAL em **32 MB** (`PRAGMA journal_size_limit = 33554432`), FTS5 (`BM25F`) e cache Content-Addressable (`cas_extractions`) por hash SHA-256. |
 | **`CsrGraph` + `PPR-HD` ([src/graph/csr.ts](./src/graph/csr.ts))** | Grafo **Compressed Sparse Row (CSR)** em `Uint32Array` e `Float32Array` com **Personalized PageRank + Hub Dampening**, executando em `< 2 ms` sem alocações na heap. |
 | **`SubmodularPacker` ([src/packer/packer.ts](./src/packer/packer.ts))** | Fatiamento cirúrgico em 4 níveis de fidelidade (`L3_FOCAL` corpo completo, `L2_CONTRACT` assinatura tipada, `L1_SKELETON` esqueleto e `L0_DELTA` deduplicação persistente cross-process por ETag). |
@@ -59,7 +60,7 @@ flowchart LR
 
 ## 3. Instalação Zero-Dependency (30 Segundos)
 
-- **Requisitos**: Node.js `>= 22.5.0` (recomendado Node.js `24+`, usa `node:sqlite` e `--experimental-strip-types` nativos do Node — **não precisa rodar `npm install`**).
+- **Requisitos**: Node.js `>= 22.13.0` (recomendado Node.js `24+`, usa `node:sqlite` e `--experimental-strip-types` nativos do Node). O núcleo **não precisa de `npm install`**; rodar `npm install` só acrescenta a camada tree-sitter opcional (mais 10 linguagens).
 - **Sistemas Operacionais**: Windows (`kvx.cmd`), Linux, macOS e WSL (`./kvx` ou `npm link`).
 
 ```bash

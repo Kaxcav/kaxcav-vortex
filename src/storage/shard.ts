@@ -14,15 +14,17 @@ import type {
   StoredSymbolRow,
 } from '../core/types.ts'
 import { CsrGraph, type CsrEdgeInput } from '../graph/csr.ts'
-import { EXTRACTOR_VERSION, PolyglotExtractor } from '../parser/extractor.ts'
-import type { SlopFinding } from '../core/types.ts'
+import { extractorVersion, PolyglotExtractor } from '../parser/extractor.ts'
+import { treeSitterStatus } from '../parser/treesitter.ts'
+import { CODE_LANGUAGES, type SlopFinding } from '../core/types.ts'
 
 /**
- * Bumped when the shard schema changes. The version is part of the shard file name so an
- * older kvx process still running (e.g. an MCP server not yet restarted) never writes old
- * rows into a newer shard.
+ * Bumped when the shard schema or the extractor family changes. The version is part of the
+ * shard file name so an older kvx process still running (e.g. an MCP server not yet
+ * restarted, or an embedded copy) never writes old rows into a newer shard. v5: polyglot
+ * extractor, optional tree-sitter layer.
  */
-export const SHARD_SCHEMA_VERSION = 4
+export const SHARD_SCHEMA_VERSION = 5
 
 /** Minimum interval between two full repository stat-walks triggered by queries. */
 const SYNC_THROTTLE_MS = 500
@@ -33,6 +35,35 @@ const WAL_MAX_DB_RATIO = 0.25
 /** Escapes `%`, `_` and `\` so user input is literal inside LIKE (use with ESCAPE '\'). */
 export function likeEscape(s: string): string {
   return s.replace(/[\\%_]/g, '\\$&')
+}
+
+/**
+ * Turns a non-relative module reference into a lowercase path (2+ segments), or null:
+ * `com.acme.Invoice` -> com/acme/invoice, `crate::db::pool` -> db/pool,
+ * `App\Models\User` -> app/models/user, `github.com/o/r/pkg/util` stays a path.
+ */
+export function moduleHintToPath(hint: string): string | null {
+  if (!hint || hint.startsWith('.')) return null
+  let path: string
+  if (hint.includes('/')) {
+    path = hint.replace(/\.(?:h|hh|hpp|hxx|rb|php|sh|ps1|py|rs|go|java|cs)$/i, '')
+  } else if (/^[A-Za-z_]\w*(?:(?:\.|::|\\)(?:[A-Za-z_]\w*|\*))+$/.test(hint)) {
+    path = hint.replace(/::|\\|\./g, '/').replace(/^(?:crate|self|super)\//, '')
+  } else {
+    return null
+  }
+  path = path.replace(/\/\*$/, '').toLowerCase()
+  return path.includes('/') ? path : null
+}
+
+/** Longest suffix of `path` (2+ segments) present in the index; ambiguous (-1) -> undefined. */
+function uniqueSuffix(index: Map<string, number>, path: string): number | undefined {
+  const parts = path.split('/').filter(Boolean)
+  for (let i = 0; i <= parts.length - 2; i++) {
+    const v = index.get(parts.slice(i).join('/'))
+    if (v !== undefined) return v === -1 ? undefined : v
+  }
+  return undefined
 }
 
 export type OutlineScope = 'topo' | 'exportado' | 'tudo'
@@ -102,13 +133,17 @@ export class RepositoryShard {
   private cachedGraph: CsrGraph | null = null
   private lastSyncEpochMs = 0
   private lastSyncAtIso = ''
-  private needsFullReextract = false
+  /** Extractor version the stored rows were built with (meta), compared on every sync. */
+  private stampedVersion: string | undefined
 
   constructor(repositoryPath: string, storageRoot: string) {
     this.repositoryPath = resolve(repositoryPath)
     mkdirSync(storageRoot, { recursive: true })
     const slug = this.computeRepoSlug(this.repositoryPath)
-    this.shardPath = join(storageRoot, `shard-${slug}-v${SHARD_SCHEMA_VERSION}.sqlite`)
+    // Processes with and without the tree-sitter layer extract differently: separate files,
+    // so they never take turns re-extracting the same shard.
+    const mode = treeSitterStatus().ready ? '-tsw' : ''
+    this.shardPath = join(storageRoot, `shard-${slug}-v${SHARD_SCHEMA_VERSION}${mode}.sqlite`)
     this.db = new DatabaseSync(this.shardPath)
     this.firewall = new AdmissionFirewall(this.repositoryPath)
     this.extractor = new PolyglotExtractor()
@@ -116,7 +151,7 @@ export class RepositoryShard {
     const versionRow = this.db
       .prepare("SELECT value FROM meta WHERE key = 'extractor_version'")
       .get() as { value: string } | undefined
-    this.needsFullReextract = versionRow?.value !== EXTRACTOR_VERSION
+    this.stampedVersion = versionRow?.value
   }
 
   /**
@@ -263,6 +298,7 @@ export class RepositoryShard {
         path_pattern TEXT NOT NULL,
         framework TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS idx_routes_file ON routes(file_id);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
         sym_id UNINDEXED,
@@ -332,7 +368,8 @@ export class RepositoryShard {
     elapsedMs: number
   } {
     const now = Date.now()
-    if (this.needsFullReextract) {
+    // Compared per sync: the optional tree-sitter layer may finish loading after the shard opens.
+    if (this.stampedVersion !== extractorVersion()) {
       force = true
       // Signatures recorded by an older extractor have another format: comparing them would be noise.
       this.db.exec('DELETE FROM symbol_history')
@@ -390,8 +427,12 @@ export class RepositoryShard {
       const delSymbolsByFile = this.db.prepare('DELETE FROM symbols WHERE file_id = ?')
       const delEdgesByFile = this.db.prepare('DELETE FROM raw_edges WHERE src_file_id = ?')
       const delRoutesByFile = this.db.prepare('DELETE FROM routes WHERE file_id = ?')
-      const delFtsSymByFile = this.db.prepare('DELETE FROM fts_symbols WHERE file_id = ?')
-      const delFtsFileById = this.db.prepare('DELETE FROM fts_files WHERE file_id = ?')
+      // FTS rows use rowid = sym_id / file_id: deleting by an UNINDEXED column scanned the whole
+      // FTS table once per file (quadratic indexing). Must run before the symbols are deleted.
+      const delFtsSymByFile = this.db.prepare(
+        'DELETE FROM fts_symbols WHERE rowid IN (SELECT sym_id FROM symbols WHERE file_id = ?)',
+      )
+      const delFtsFileById = this.db.prepare('DELETE FROM fts_files WHERE rowid = ?')
 
       const insertSymStmt = this.db.prepare(`
         INSERT INTO symbols(
@@ -402,12 +443,12 @@ export class RepositoryShard {
         RETURNING sym_id
       `)
       const insertFtsSymStmt = this.db.prepare(`
-        INSERT INTO fts_symbols(sym_id, file_id, rel_path, name, signature, doc_summary, slice_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO fts_symbols(rowid, sym_id, file_id, rel_path, name, signature, doc_summary, slice_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `)
       const insertFtsFileStmt = this.db.prepare(`
-        INSERT INTO fts_files(file_id, rel_path, headings, summary, body_text)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO fts_files(rowid, file_id, rel_path, headings, summary, body_text)
+        VALUES (?, ?, ?, ?, ?, ?)
       `)
       const insertEdgeStmt = this.db.prepare(`
         INSERT INTO raw_edges(src_file_id, src_sym_name, dst_name, dst_path_hint, kind, weight)
@@ -475,13 +516,14 @@ export class RepositoryShard {
           }
         }
 
+        delFtsSymByFile.run(fileId)
+        delFtsFileById.run(fileId)
         delSymbolsByFile.run(fileId)
         delEdgesByFile.run(fileId)
         delRoutesByFile.run(fileId)
-        delFtsSymByFile.run(String(fileId))
-        delFtsFileById.run(String(fileId))
 
         insertFtsFileStmt.run(
+          fileId,
           String(fileId),
           scanned.relPath.replace(/[/_.-]+/g, ' ') + ' ' + scanned.relPath,
           extraction.headings,
@@ -510,6 +552,7 @@ export class RepositoryShard {
           ) as { sym_id: number }
 
           insertFtsSymStmt.run(
+            symRow.sym_id,
             String(symRow.sym_id),
             String(fileId),
             scanned.relPath.replace(/[/_.-]+/g, ' '),
@@ -549,11 +592,11 @@ export class RepositoryShard {
       // Remove deleted files
       for (const prev of existingRows) {
         if (!seenPaths.has(prev.rel_path)) {
+          delFtsSymByFile.run(prev.file_id)
+          delFtsFileById.run(prev.file_id)
           delSymbolsByFile.run(prev.file_id)
           delEdgesByFile.run(prev.file_id)
           delRoutesByFile.run(prev.file_id)
-          delFtsSymByFile.run(String(prev.file_id))
-          delFtsFileById.run(String(prev.file_id))
           this.db.prepare('DELETE FROM files WHERE file_id = ?').run(prev.file_id)
           removedFiles++
         }
@@ -568,14 +611,14 @@ export class RepositoryShard {
       if (updatedFiles > 0 || removedFiles > 0 || force) {
         setMeta.run('last_indexed_at', new Date().toISOString())
       }
-      if (force) setMeta.run('extractor_version', EXTRACTOR_VERSION)
+      if (force) setMeta.run('extractor_version', extractorVersion())
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
       throw err
     }
 
-    if (force) this.needsFullReextract = false
+    if (force) this.stampedVersion = extractorVersion()
     this.lastSyncAtIso = new Date().toISOString()
     if (updatedFiles > 0 || removedFiles > 0 || force) this.maybeCheckpointWal(true)
     this.lastSyncEpochMs = Date.now()
@@ -591,7 +634,7 @@ export class RepositoryShard {
 
   /** The payload carries path-qualified names, so identical files at two paths get two entries. */
   private casKey(contentHash: string, relPath: string): string {
-    return `${EXTRACTOR_VERSION}:${relPath}:${contentHash}`
+    return `${extractorVersion()}:${relPath}:${contentHash}`
   }
 
   /**
@@ -714,7 +757,7 @@ export class RepositoryShard {
           `SELECT f.rel_path AS relPath, c.payload_json AS payload
            FROM files f JOIN cas_extractions c ON c.content_hash = ? || f.rel_path || ':' || f.content_hash`,
         )
-        .all(`${EXTRACTOR_VERSION}:`) as Array<{ relPath: string; payload: string }>
+        .all(`${extractorVersion()}:`) as Array<{ relPath: string; payload: string }>
       for (const row of rows) {
         const ext = JSON.parse(row.payload) as ExtractionResult
         for (const f of ext.slopFindings ?? []) slops.push({ ...f, relPath: row.relPath })
@@ -747,10 +790,38 @@ export class RepositoryShard {
     const fileByBasename = new Map<string, number[]>()
     const fileByRelNoExt = new Map<string, number>()
 
+    // Path suffixes with 2+ segments (`acme/invoice`), for module-style imports. `__init__.py`
+    // and `mod.rs` also answer for their directory. -1 marks an ambiguous suffix.
+    const fileBySuffix = new Map<string, number>()
+    const dirBySuffix = new Map<string, number>()
+    const dirIds = new Map<string, number>()
+    const filesByDir = new Map<number, number[]>()
+    const addSuffixes = (index: Map<string, number>, path: string, id: number) => {
+      const parts = path.split('/')
+      for (let i = parts.length - 2; i >= 0; i--) {
+        const key = parts.slice(i).join('/')
+        const cur = index.get(key)
+        index.set(key, cur === undefined || cur === id ? id : -1)
+      }
+    }
+
     for (const f of files) {
       fileById.set(f.file_id, f.rel_path)
       const noExt = f.rel_path.replace(/\.\w+$/, '').toLowerCase()
       fileByRelNoExt.set(noExt, f.file_id)
+      addSuffixes(fileBySuffix, noExt.replace(/\/(?:__init__|mod)$/, ''), f.file_id)
+      const dir = posix.dirname(f.rel_path).toLowerCase()
+      if (dir !== '.') {
+        let dirId = dirIds.get(dir)
+        if (dirId === undefined) {
+          dirId = dirIds.size
+          dirIds.set(dir, dirId)
+          addSuffixes(dirBySuffix, dir, dirId)
+        }
+        const list = filesByDir.get(dirId) ?? []
+        if (list.length < 12) list.push(f.file_id)
+        filesByDir.set(dirId, list)
+      }
       const base = (f.rel_path.split('/').pop() ?? f.rel_path).replace(/\.\w+$/, '').toLowerCase()
       const list = fileByBasename.get(base) ?? []
       list.push(f.file_id)
@@ -791,6 +862,21 @@ export class RepositoryShard {
           const exactRelId = fileByRelNoExt.get(resolvedRel)
           if (exactRelId) {
             addEdge(e.src_file_id, exactRelId, Math.max(1.5, e.weight * 1.5), true)
+            continue
+          }
+        }
+        // Module paths of the other languages: `com.acme.Invoice`, `a.b`, `crate::x::y`,
+        // `App\Models\User`, `github.com/org/repo/pkg/util` -> path suffix of a file or package dir.
+        const modPath = moduleHintToPath(e.dst_path_hint)
+        if (modPath) {
+          const fileHit = uniqueSuffix(fileBySuffix, modPath) ?? uniqueSuffix(fileBySuffix, posix.dirname(modPath))
+          if (fileHit !== undefined) {
+            addEdge(e.src_file_id, fileHit, Math.max(1.5, e.weight * 1.5), true)
+            continue
+          }
+          const dirFiles = uniqueSuffix(dirBySuffix, modPath)
+          if (dirFiles !== undefined) {
+            for (const id of filesByDir.get(dirFiles) ?? []) addEdge(e.src_file_id, id, Math.max(1.2, e.weight), true)
             continue
           }
         }
@@ -913,7 +999,7 @@ export class RepositoryShard {
             return false
           }
         } else if (cleanCorpus === 'code') {
-          if (!['typescript', 'javascript', 'python', 'go', 'powershell'].includes(l)) {
+          if (!CODE_LANGUAGES.has(l)) {
             return false
           }
         }
@@ -1777,7 +1863,7 @@ export class RepositoryShard {
       walSizeBytes,
       lastIndexedAt: lastRow?.value ?? new Date().toISOString(),
       schemaVersion: SHARD_SCHEMA_VERSION,
-      extractorVersion: EXTRACTOR_VERSION,
+      extractorVersion: extractorVersion(),
       indexAge: this.indexAgeSummary(),
     }
   }

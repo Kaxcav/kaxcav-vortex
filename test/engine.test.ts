@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { TsDeclarationScanner } from '../src/parser/ts-scanner.ts'
 import { CodeStateMachine } from '../src/parser/lexer.ts'
 import { KaxcavVortexEngine } from '../src/engine.ts'
@@ -310,6 +311,38 @@ describe('engine', () => {
     } finally {
       engine.close()
       cleanup(home)
+    }
+  })
+
+  it('re-indexing replaces FTS rows by rowid: no orphans after edits and deletions', () => {
+    const repo = tmp('kvx-fts-')
+    const home = tmp('kvx-home-')
+    write(repo, 'src/a.ts', 'export function alphaOld() {\n  return 1\n}\n')
+    write(repo, 'src/b.ts', 'export function keepMe() {\n  return 2\n}\n')
+    const engine = new KaxcavVortexEngine(home)
+    try {
+      engine.addRepo(repo)
+      const shard = engine.getOrOpenShard(repo)
+      write(repo, 'src/a.ts', 'export function betaNew() {\n  return 1\n}\nexport function gammaNew() {\n  return 3\n}\n')
+      shard.refreshFile('src/a.ts')
+      fs.rmSync(path.join(repo, 'src', 'b.ts'))
+      shard.sync(true)
+      const shardDir = path.join(home, 'shards')
+      const dbFile = fs.readdirSync(shardDir).find((f) => f.endsWith('.sqlite'))!
+      const db = new DatabaseSync(path.join(shardDir, dbFile), { readOnly: true })
+      try {
+        const count = (sql: string) => (db.prepare(sql).get() as { c: number }).c
+        assert.equal(count('SELECT COUNT(*) AS c FROM fts_symbols'), count('SELECT COUNT(*) AS c FROM symbols'))
+        assert.equal(count('SELECT COUNT(*) AS c FROM fts_files'), count('SELECT COUNT(*) AS c FROM files'))
+        assert.equal(count("SELECT COUNT(*) AS c FROM fts_symbols WHERE fts_symbols MATCH 'alphaOld'"), 0)
+        assert.equal(count("SELECT COUNT(*) AS c FROM fts_symbols WHERE fts_symbols MATCH 'keepMe'"), 0)
+        assert.equal(count("SELECT COUNT(*) AS c FROM fts_symbols WHERE fts_symbols MATCH 'gammaNew'"), 1)
+      } finally {
+        db.close()
+      }
+    } finally {
+      engine.close()
+      cleanup(repo, home)
     }
   })
 })

@@ -22,5 +22,13 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Node and SQLite
         run: node -e "const s=require('node:sqlite');console.log(process.version, typeof s.DatabaseSync)"
-      - name: Tests
+      # Zero-dependency mode first: the built-in extractors, tree-sitter tests skip themselves.
+      - name: Tests (no dependencies)
         run: npm test
+      - name: Install optional tree-sitter layer
+        run: npm ci
+      - name: Tests (tree-sitter WASM)
+        run: npm test
+      - name: tree-sitter must be active in this round
+        shell: bash
+        run: node --experimental-strip-types --no-warnings -e "import('./src/parser/treesitter.ts').then(async (m) => { const r = await m.initTreeSitter(); console.log(JSON.stringify(r)); if (!r.ready) process.exit(1) })"
