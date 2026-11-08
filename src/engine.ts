@@ -24,7 +24,7 @@ import { MultiRepoFederator } from './federation/federator.ts'
 import { DriveNexusVault } from './nexus/vault.ts'
 import { SubmodularPacker } from './packer/packer.ts'
 import { syntaxErrorCount, treeSitterStatus } from './parser/treesitter.ts'
-import { RepositoryShard, type OutlineScope, type ReferencesResult, type SymbolSlice, type TextHit } from './storage/shard.ts'
+import { RepositoryShard, type OutlineScope, type ReferencesResult, type RepoMapResult, type SymbolSlice, type TextHit } from './storage/shard.ts'
 
 /**
  * Canonical form of a repository path on this machine (K3): absolute, no trailing
@@ -589,6 +589,13 @@ export class KaxcavVortexEngine {
       (similar.length ? `; parecidos: ${similar.slice(0, 5).join(', ')}` : '') +
       (textHits.length ? '; ocorrências abaixo via busca textual' : '')
     return { matches: [], via: textHits.length ? 'busca_textual' : 'nenhum', reason, similar, textHits }
+  }
+
+  /** Orientation map without a query: files by dependency PageRank with their exported signatures. */
+  repoMap(repositoryPath: string, opts: { budget?: number; focus?: string[]; path?: string; includeTests?: boolean } = {}): RepoMapResult {
+    const shard = this.getOrOpenShard(repositoryPath)
+    if (opts.path) this.assertPathAllowed(ABSOLUTE_PATH_RE.test(opts.path) ? opts.path : resolve(shard.repositoryPath, opts.path))
+    return shard.repoMap(opts)
   }
 
   /** Usages of a symbol with confidence (same_file | imported | name_only); see RepositoryShard.findReferences. */

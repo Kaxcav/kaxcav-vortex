@@ -29,6 +29,13 @@ export const SHARD_SCHEMA_VERSION = 5
 /** Minimum interval between two full repository stat-walks triggered by queries. */
 const SYNC_THROTTLE_MS = 500
 
+/**
+ * A large (re)index commits every N extracted files. One transaction for a whole big repo made
+ * the WAL grow to gigabytes and SQLite slower with every page (HyperAv, 8.7k files: 18 min).
+ * Every file's rows are replaced together, so a reader between batches sees whole files.
+ */
+const SYNC_BATCH_FILES = 300
+
 /** WAL is truncated after an indexing pass, or whenever it exceeds this fraction of the DB. */
 const WAL_MAX_DB_RATIO = 0.25
 
@@ -113,6 +120,15 @@ export interface SymbolSlice {
   sliceText: string
   /** Body hash of the slice: pass it back as `expected_hash` to edit_symbol. */
   hash: string
+}
+
+export interface RepoMapResult {
+  ok: boolean
+  reason?: string
+  markdown: string
+  files: Array<{ path: string; score: number; symbols: number }>
+  tokens: number
+  omittedFiles?: number
 }
 
 export type RefConfidence = 'same_file' | 'imported' | 'name_only'
@@ -230,6 +246,7 @@ export class RepositoryShard {
       PRAGMA journal_size_limit = 33554432;
       PRAGMA temp_store = MEMORY;
       PRAGMA mmap_size = 67108864;
+      PRAGMA cache_size = -65536;
 
       CREATE TABLE IF NOT EXISTS symbol_locks (
         qualified_name TEXT PRIMARY KEY,
@@ -636,6 +653,10 @@ export class RepositoryShard {
         }
 
         updatedFiles++
+        if (updatedFiles % SYNC_BATCH_FILES === 0) {
+          this.db.exec('COMMIT')
+          this.db.exec('BEGIN IMMEDIATE')
+        }
       }
 
       // Remove deleted files
@@ -1417,6 +1438,121 @@ export class RepositoryShard {
       references: shown,
       truncated: hits.length > shown.length,
     }
+  }
+
+  /**
+   * Orientation map without a query (Aider-style): code files ranked by PageRank over the
+   * forward dependency graph (importer -> imported), optionally personalized to `focus` files,
+   * each with its exported signatures, filled until the token budget.
+   */
+  repoMap(opts: { budget?: number; focus?: string[]; path?: string; includeTests?: boolean } = {}): RepoMapResult {
+    this.sync(false)
+    const budget = Math.max(200, Math.min(opts.budget ?? 1500, 20_000))
+    const { graph, indexToFile } = this.getCsrGraph()
+    const N = graph.nodeCount
+    const isTest = (p: string) => /(?:^|\/)(?:tests?|__tests__|spec)\/|[._-](?:test|spec)\.\w+$|_test\.go$|(?:^|\/)test_[^/]+\.py$/i.test(p)
+    const pathFilter = opts.path ? this.resolveRepoPath(opts.path) : null
+    if (pathFilter && !pathFilter.ok) return { ok: false, reason: pathFilter.reason, markdown: '', files: [], tokens: 0 }
+    const prefix = pathFilter?.ok ? pathFilter.relPath.toLowerCase() : ''
+    const eligible = new Uint8Array(N)
+    for (let i = 0; i < N; i++) {
+      const f = indexToFile[i]
+      const rel = f.relPath.toLowerCase()
+      if (!CODE_LANGUAGES.has(f.lang)) continue
+      if (!opts.includeTests && isTest(f.relPath)) continue
+      if (prefix && rel !== prefix && !rel.startsWith(prefix.endsWith('/') ? prefix : prefix + '/')) continue
+      eligible[i] = 1
+    }
+    const focusIdx = new Set<number>()
+    for (const q of opts.focus ?? []) {
+      const r = this.resolveRepoPath(q)
+      if (!r.ok) continue
+      const idx = indexToFile.findIndex((f) => f.relPath.toLowerCase() === r.relPath.toLowerCase())
+      if (idx >= 0) focusIdx.add(idx)
+    }
+    // Teleport: focus files when given, otherwise every eligible file.
+    const teleport = new Float64Array(N)
+    let tSum = 0
+    for (let i = 0; i < N; i++) {
+      const w = focusIdx.size > 0 ? (focusIdx.has(i) ? 1 : 0) : eligible[i]
+      teleport[i] = w
+      tSum += w
+    }
+    if (tSum === 0) return { ok: true, markdown: '', files: [], tokens: 0, reason: 'nenhum arquivo de código no escopo' }
+    for (let i = 0; i < N; i++) teleport[i] /= tSum
+    let rank = Float64Array.from(teleport)
+    const next = new Float64Array(N)
+    const d = 0.85
+    // Around focus files, their dependents matter too: reverse edges carry rank at half weight.
+    const rev = focusIdx.size > 0 ? 0.5 : 0
+    const outW = new Float64Array(N)
+    for (let u = 0; u < N; u++) {
+      for (let k = graph.rowPtr[u]; k < graph.rowPtr[u + 1]; k++) outW[u] += graph.weights[k]
+      if (rev) for (let k = graph.reverseRowPtr[u]; k < graph.reverseRowPtr[u + 1]; k++) outW[u] += graph.reverseWeights[k] * rev
+    }
+    for (let iter = 0; iter < 30; iter++) {
+      let dangling = 0
+      next.fill(0)
+      for (let u = 0; u < N; u++) {
+        if (outW[u] <= 0) {
+          dangling += rank[u]
+          continue
+        }
+        const share = (d * rank[u]) / outW[u]
+        for (let k = graph.rowPtr[u]; k < graph.rowPtr[u + 1]; k++) next[graph.colIdx[k]] += share * graph.weights[k]
+        if (rev) for (let k = graph.reverseRowPtr[u]; k < graph.reverseRowPtr[u + 1]; k++) next[graph.reverseColIdx[k]] += share * graph.reverseWeights[k] * rev
+      }
+      for (let i = 0; i < N; i++) next[i] += ((1 - d) + d * dangling) * teleport[i]
+      rank = Float64Array.from(next)
+    }
+
+    // Focus files lead (they are what the map is about), then everything else by rank.
+    const order = [...rank.keys()]
+      .filter((i) => eligible[i] || focusIdx.has(i))
+      .sort((a, b) => Number(focusIdx.has(b)) - Number(focusIdx.has(a)) || rank[b] - rank[a])
+    const symStmt = this.db.prepare(
+      `SELECT name, kind, scope, parent, signature, start_line AS line FROM symbols
+       WHERE file_id = ? AND scope != 'local' AND exported = 1 AND kind != 'section'
+       ORDER BY start_line ASC`,
+    )
+    const tok = (s: string) => Math.ceil(s.length / 4) + 1
+    const out: string[] = []
+    const files: RepoMapResult['files'] = []
+    let used = 0
+    const MAX_SYMS = 14
+    for (const i of order) {
+      const f = indexToFile[i]
+      const syms = symStmt.all(f.fileId) as Array<{ name: string; kind: string; scope: string; parent: string | null; signature: string; line: number }>
+      const header = `${f.relPath}${focusIdx.has(i) ? '  (foco)' : ''}`
+      const lines: string[] = []
+      for (const s of syms.slice(0, MAX_SYMS)) {
+        let sig = s.signature.replace(/\s+/g, ' ').trim()
+        if (s.parent && sig.startsWith(`${s.parent}.`)) sig = sig.slice(s.parent.length + 1)
+        if (s.parent && sig.includes(` ${s.parent}.`)) sig = sig.replace(` ${s.parent}.`, ' ')
+        lines.push(`${s.scope === 'member' ? '    ' : '  '}${sig.length > 100 ? `${sig.slice(0, 99)}…` : sig}`)
+      }
+      if (syms.length > MAX_SYMS) lines.push(`  … +${syms.length - MAX_SYMS} símbolos (file_outline)`)
+      const cost = tok(header) + lines.reduce((n, l) => n + tok(l), 0)
+      if (used + cost > budget) {
+        // the header alone still fits: list the file without signatures
+        if (used + tok(header) <= budget && files.length > 0) {
+          out.push(header)
+          used += tok(header)
+          files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: 0 })
+          continue
+        }
+        if (files.length === 0) {
+          out.push(header, ...lines.slice(0, Math.max(1, Math.floor((budget - tok(header)) / 12))))
+          files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: syms.length })
+        }
+        break
+      }
+      out.push(header, ...lines)
+      used += cost
+      files.push({ path: f.relPath, score: Number(rank[i].toFixed(5)), symbols: syms.length })
+    }
+    const markdown = out.join('\n')
+    return { ok: true, markdown, files, tokens: Math.ceil(markdown.length / 4), omittedFiles: Math.max(0, order.length - files.length) }
   }
 
   computeBlastRadius(targetSymbolOrPath: string): BlastRadiusReport {

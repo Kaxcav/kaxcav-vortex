@@ -100,6 +100,16 @@ export const TOOL_DEFS: ToolDef[] = [
     inputSchema: { type: 'object', properties: { repo: str, symbol: str, path: str }, required: ['symbol'] },
   },
   {
+    name: 'repo_map',
+    readOnly: true,
+    description:
+      'Orientation map with no query: code files ranked by dependency PageRank (what the rest of the code depends on comes first), each with its exported signatures, within `budget` tokens (default 1500). `focus` (files) personalizes the ranking around them; `path` limits to a folder; tests are left out unless `include_tests`.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, budget: num, focus: { type: 'array', items: str }, path: str, include_tests: { type: 'boolean' } },
+    },
+  },
+  {
     name: 'find_references',
     readOnly: true,
     description:
@@ -295,6 +305,19 @@ export class VortexMcpServer {
           path: args.path ? String(args.path) : undefined,
         })
         return this.text(id, res.matches.length > 0 ? res.matches : res)
+      }
+      case 'repo_map': {
+        const res = this.engine.repoMap(this.repoArg(args), {
+          budget: args.budget ? Number(args.budget) : undefined,
+          focus: Array.isArray(args.focus) ? args.focus.map(String) : undefined,
+          path: args.path ? String(args.path) : undefined,
+          includeTests: flag(args.include_tests),
+        })
+        if (!res.ok) return this.text(id, res, { isError: true })
+        return this.respond(id, {
+          content: [{ type: 'text', text: res.markdown || res.reason || '' }],
+          meta: { tokens: res.tokens, files: res.files.length, omittedFiles: res.omittedFiles },
+        })
       }
       case 'find_references': {
         const res = this.engine.findReferences(this.repoArg(args), String(args.symbol ?? args.name ?? ''), {
