@@ -743,8 +743,14 @@ export class RepositoryShard {
 
   /** Re-extracts one file even if a rewrite kept its mtime and size (edit_symbol). */
   reindexFile(relPath: string): void {
-    this.db.prepare('UPDATE files SET mtime_ms = -1 WHERE rel_path = ?').run(relPath)
-    this.refreshFile(relPath)
+    this.reindexFiles([relPath])
+  }
+
+  /** Same for several files with a single sync (rename_symbol). */
+  reindexFiles(relPaths: string[]): void {
+    const stmt = this.db.prepare('UPDATE files SET mtime_ms = -1 WHERE rel_path = ?')
+    for (const rel of relPaths) stmt.run(rel)
+    this.syncNow()
   }
 
   /** Non-local symbols of a file that start at `line`, widest first. */

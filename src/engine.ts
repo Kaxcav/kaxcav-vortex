@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -20,6 +21,7 @@ import { checkKvxIgnore, describeKvxIgnoreBlock, KvxIgnoreError, normalizeFsPath
 import { AdmissionFirewall } from './core/firewall.ts'
 import { applyLineEdit, lockViolations, sliceLines, SYMBOL_EDIT_OPS, type SymbolEditOp, type SymbolLock } from './edit/symbol-editor.ts'
 import { PolyglotExtractor } from './parser/extractor.ts'
+import { blankForLang } from './parser/refs.ts'
 import { MultiRepoFederator } from './federation/federator.ts'
 import { DriveNexusVault } from './nexus/vault.ts'
 import { SubmodularPacker } from './packer/packer.ts'
@@ -71,6 +73,33 @@ export interface SymbolEditOutcome {
   linesAdded?: number
   syntaxErrors?: { before: number | null; after: number | null }
   preview?: string
+}
+
+export interface RenameRequest {
+  symbol: string
+  newName: string
+  path?: string
+  /** Token of a previous plan: applies it if nothing changed since. Without it, only plans. */
+  planToken?: string
+  includeNameOnly?: boolean
+}
+
+export interface RenameOutcome {
+  ok: boolean
+  applied?: boolean
+  reason?: string
+  candidates?: string[]
+  planToken?: string
+  violations?: Array<{ qualifiedName: string; mode: string; violation: string; source: string }>
+  plan?: {
+    target: string
+    oldName: string
+    newName: string
+    files: Array<{ relPath: string; edits: number }>
+    totalEdits: number
+    preview: string[]
+    skipped: string[]
+  }
 }
 
 export interface ReadSymbolOutcome {
@@ -589,6 +618,145 @@ export class KaxcavVortexEngine {
       (similar.length ? `; parecidos: ${similar.slice(0, 5).join(', ')}` : '') +
       (textHits.length ? '; ocorrências abaixo via busca textual' : '')
     return { matches: [], via: textHits.length ? 'busca_textual' : 'nenhum', reason, similar, textHits }
+  }
+
+  /**
+   * Two-phase rename (full server only). Without `planToken`: plans and writes nothing —
+   * declaration + same_file/imported usages (name_only ones are listed as skipped unless
+   * `includeNameOnly`), refusing name collisions, .kvxignore'd files, broken locks and new
+   * syntax errors. With the token of that plan: re-plans, refuses if anything changed, then
+   * writes every file (restoring the ones already written if a write fails) and reindexes.
+   */
+  renameSymbol(repositoryPath: string, req: RenameRequest): RenameOutcome {
+    const newName = (req.newName ?? '').trim()
+    if (!/^[A-Za-z_$][\w$]*$/.test(newName)) return { ok: false, reason: `novo nome inválido '${newName}'` }
+    const { query, opts } = this.splitSymbolQuery(req.symbol, { path: req.path })
+    const { shard } = this.shardForFile(repositoryPath, opts.path ?? '')
+    shard.syncNow()
+    const refs = shard.findReferences(query, { path: opts.path, limit: 5000 })
+    if (!refs.ok || !refs.target) return { ok: false, reason: refs.reason, candidates: refs.candidates }
+    const target = refs.target
+    const oldName = target.qualifiedName.slice(target.relPath.length + 1).split('.').pop() ?? ''
+    if (oldName === newName) return { ok: false, reason: 'o novo nome é igual ao atual' }
+    if (shard.readSymbol(`${target.relPath}#${target.qualifiedName.slice(target.relPath.length + 1).replace(/[^.]+$/, newName)}`).length > 0) {
+      return { ok: false, reason: `já existe '${newName}' no mesmo escopo em ${target.relPath}` }
+    }
+
+    const included = (refs.references ?? []).filter((r) => r.confidence !== 'name_only' || req.includeNameOnly)
+    const skipped = (refs.references ?? []).filter((r) => r.confidence === 'name_only' && !req.includeNameOnly)
+    const edits: Array<{ relPath: string; line: number; col: number }> = included.map((r) => ({ relPath: r.relPath, line: r.line, col: r.col }))
+
+    // The declaration site: first whole-word occurrence of the name in the declaration head.
+    const files = new Map<string, { abs: string; content: string }>()
+    const load = (rel: string) => {
+      let f = files.get(rel)
+      if (!f) {
+        const abs = join(shard.repositoryPath, ...rel.split('/'))
+        this.assertPathAllowed(abs, { fresh: true })
+        f = { abs, content: readFileSync(abs, 'utf8') }
+        files.set(rel, f)
+      }
+      return f
+    }
+    const decl = load(target.relPath)
+    const declLines = blankForLang(AdmissionFirewall.detectLanguage(target.relPath) ?? 'other', decl.content).split('\n')
+    const wordRe = new RegExp(`(?<![\\w$])${oldName.replace(/\$/g, '\\$')}(?![\\w$])`)
+    let declSite: { line: number; col: number } | null = null
+    for (let l = target.startLine; l <= Math.min(declLines.length, target.startLine + 6) && !declSite; l++) {
+      const m = wordRe.exec(declLines[l - 1] ?? '')
+      if (m) declSite = { line: l, col: m.index + 1 }
+    }
+    if (!declSite) return { ok: false, reason: `não achei o nome '${oldName}' na declaração de ${target.qualifiedName}` }
+    if (!edits.some((e) => e.relPath === target.relPath && e.line === declSite!.line && e.col === declSite!.col)) {
+      edits.push({ relPath: target.relPath, ...declSite })
+    }
+
+    // Build the new content of every touched file (right to left inside each line).
+    const byFile = new Map<string, Array<{ line: number; col: number }>>()
+    for (const e of edits) {
+      const list = byFile.get(e.relPath) ?? []
+      list.push({ line: e.line, col: e.col })
+      byFile.set(e.relPath, list)
+    }
+    const planned: Array<{ relPath: string; abs: string; before: string; after: string; edits: number; preview: string[] }> = []
+    const hash = createHash('sha256').update(`${target.qualifiedName}\0${newName}`)
+    for (const [rel, list] of [...byFile].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const f = load(rel)
+      const bom = f.content.startsWith('﻿') ? '﻿' : ''
+      const body = bom ? f.content.slice(1) : f.content
+      const eol = body.includes('\r\n') ? '\r\n' : '\n'
+      const lines = body.split(/\r?\n/)
+      const preview: string[] = []
+      list.sort((a, b) => b.line - a.line || b.col - a.col)
+      for (const e of list) {
+        const text = lines[e.line - 1] ?? ''
+        if (text.slice(e.col - 1, e.col - 1 + oldName.length) !== oldName) {
+          return { ok: false, reason: `${rel}:${e.line}:${e.col} não contém '${oldName}' (índice desatualizado); planeje de novo` }
+        }
+        const nextLine = text.slice(0, e.col - 1) + newName + text.slice(e.col - 1 + oldName.length)
+        preview.push(`${rel}:${e.line}  ${text.trim()}  ->  ${nextLine.trim()}`)
+        lines[e.line - 1] = nextLine
+      }
+      const after = bom + lines.join(eol)
+      planned.push({ relPath: rel, abs: f.abs, before: f.content, after, edits: list.length, preview: preview.reverse() })
+      hash.update(`\0${rel}\0${createHash('sha256').update(f.content).digest('hex')}\0${list.map((e) => `${e.line}:${e.col}`).join(',')}`)
+    }
+    const token = hash.digest('hex').slice(0, 24)
+    for (const p of planned) {
+      if (p.relPath !== target.relPath && shard.readSymbol(`${p.relPath}#${newName}`).some((s) => s.scope !== 'local')) {
+        return { ok: false, reason: `${p.relPath} já declara '${newName}': o rename criaria um conflito de nomes` }
+      }
+    }
+
+    // Guards per file: syntax and locks.
+    const locks = this.listSymbolLocks(shard.repositoryPath)
+    const extractor = new PolyglotExtractor()
+    const problems: string[] = []
+    const violations: NonNullable<RenameOutcome['violations']> = []
+    for (const p of planned) {
+      const lang = AdmissionFirewall.detectLanguage(p.relPath) ?? 'other'
+      const before = syntaxErrorCount(lang, p.relPath, p.before)
+      const after = syntaxErrorCount(lang, p.relPath, p.after)
+      if (before !== null && after !== null && after > before) problems.push(`${p.relPath}: +${after - before} erro(s) de sintaxe`)
+      if (locks.length > 0) {
+        const scanned = (content: string) => ({ absPath: p.abs, relPath: p.relPath, contentHash: '', mtimeMs: 0, byteSize: content.length, lang, content, tokenEstimate: 1 })
+        violations.push(...lockViolations(p.relPath, extractor.extract(scanned(p.before)), extractor.extract(scanned(p.after)), locks))
+      }
+    }
+    const plan = {
+      target: target.qualifiedName,
+      oldName,
+      newName,
+      files: planned.map((p) => ({ relPath: p.relPath, edits: p.edits })),
+      totalEdits: planned.reduce((n, p) => n + p.edits, 0),
+      preview: planned.flatMap((p) => p.preview).slice(0, 60),
+      skipped: skipped.map((r) => `${r.relPath}:${r.line}  ${r.text}`).slice(0, 40),
+    }
+    if (problems.length > 0) return { ok: false, reason: `o rename quebraria a sintaxe: ${problems.join('; ')}`, plan }
+    if (violations.length > 0) return { ok: false, reason: `o rename quebraria ${violations.length} trava(s) de símbolo`, violations, plan }
+    if (!req.planToken) return { ok: true, applied: false, planToken: token, plan }
+    if (req.planToken !== token) return { ok: false, reason: 'o código mudou desde o plano (token diferente); planeje de novo', plan, planToken: token }
+
+    // Apply: temp files first, then renames; on failure restore what was already replaced.
+    const written: typeof planned = []
+    try {
+      for (const p of planned) writeFileSync(`${p.abs}.kvx-rename.tmp`, p.after, 'utf8')
+      for (const p of planned) {
+        try {
+          chmodSync(`${p.abs}.kvx-rename.tmp`, statSync(p.abs).mode)
+        } catch {
+          // advisory on Windows
+        }
+        renameSync(`${p.abs}.kvx-rename.tmp`, p.abs)
+        written.push(p)
+      }
+    } catch (err) {
+      for (const p of written) writeFileSync(p.abs, p.before, 'utf8')
+      for (const p of planned) rmSync(`${p.abs}.kvx-rename.tmp`, { force: true })
+      return { ok: false, reason: `falha ao gravar (${err instanceof Error ? err.message : String(err)}); arquivos restaurados`, plan }
+    }
+    shard.reindexFiles(planned.map((p) => p.relPath))
+    return { ok: true, applied: true, planToken: token, plan }
   }
 
   /** Orientation map without a query: files by dependency PageRank with their exported signatures. */

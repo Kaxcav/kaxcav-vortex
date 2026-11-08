@@ -189,6 +189,11 @@ export function blankHashComments(src: string): string {
 
 const HASH_LANGS = new Set(['python', 'ruby', 'bash', 'powershell'])
 
+/** Column-preserving code view of a file in its language's comment syntax. */
+export function blankForLang(lang: string, src: string): string {
+  return HASH_LANGS.has(lang) ? blankHashComments(src) : blankNonCode(src)
+}
+
 /**
  * Text collector (TS/JS, and the code languages tree-sitter does not cover in this run):
  * identifiers outside strings/comments, classified by their immediate context.

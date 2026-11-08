@@ -153,6 +153,16 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
   {
+    name: 'rename_symbol',
+    description:
+      'Two-phase rename of ONE symbol across the repository. Without `plan_token`: returns the plan (every edit as file:line before -> after, usages skipped as name_only, and a `plan_token`) and writes nothing. Call again with that `plan_token` to apply: refused if any file changed since the plan. Covers the declaration and same_file/imported usages (`include_name_only` adds same-name usages without an import link). Refuses name collisions, .kvxignore\'d files, broken symbol locks and new syntax errors. Not available on the read-only server.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: str, symbol: str, new_name: str, path: str, plan_token: str, include_name_only: { type: 'boolean' } },
+      required: ['symbol', 'new_name'],
+    },
+  },
+  {
     name: 'nexus_ingest_vault',
     description:
       'Zero-Data-Loss ingestion of a directory or Google Drive mirror (.xlsx, .docx, .pdf, .zip, AppsScript .json, .csv, .sql, .md) with DLP secret redaction and authority conflict detection. Paths blocked by .kvxignore are refused.',
@@ -340,6 +350,16 @@ export class VortexMcpServer {
           expectedHash: args.expected_hash ? String(args.expected_hash) : undefined,
           dryRun: flag(args.dry_run),
           allowSyntaxErrors: flag(args.allow_syntax_errors),
+        })
+        return this.text(id, res, res.ok ? {} : { isError: true })
+      }
+      case 'rename_symbol': {
+        const res = this.engine.renameSymbol(this.repoArg(args), {
+          symbol: String(args.symbol ?? args.name ?? ''),
+          newName: String(args.new_name ?? ''),
+          path: args.path ? String(args.path) : undefined,
+          planToken: args.plan_token ? String(args.plan_token) : undefined,
+          includeNameOnly: flag(args.include_name_only),
         })
         return this.text(id, res, res.ok ? {} : { isError: true })
       }
