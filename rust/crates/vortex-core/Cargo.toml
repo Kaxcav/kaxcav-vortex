@@ -1,0 +1,45 @@
+[package]
+name = "vortex-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Kaxcav Vortex Native Rust Engine: tree-sitter AST, CSR Graph, PPR, Tarjan SCC, Submodular Packer L0-L3, FailureSlicer, SymbolEditor, DLP & Drive Nexus"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+rayon.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+ignore.workspace = true
+globset.workspace = true
+regex.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+csv.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-java.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

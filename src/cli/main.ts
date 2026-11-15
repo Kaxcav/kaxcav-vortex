@@ -7,6 +7,23 @@ import { VortexMcpServer } from '../mcp/server.ts'
 import { initTreeSitter } from '../parser/treesitter.ts'
 import { VortexDashboardServer } from '../ui/server.ts'
 
+const BOOLEAN_FLAGS = new Set([
+  'json',
+  'mcp',
+  'read-only',
+  'federate',
+  'test',
+  'full',
+  'apply',
+  'dry-run',
+  'selfcheck',
+  'standalone',
+  'help',
+  'h',
+  'version',
+  'v',
+])
+
 function parseFlags(argv: string[]): {
   command: string
   positional: string[]
@@ -34,7 +51,7 @@ function parseFlags(argv: string[]): {
       } else {
         const key = arg.slice(2)
         const next = argv[i + 1]
-        if (next && !next.startsWith('-')) {
+        if (!BOOLEAN_FLAGS.has(key) && next && !next.startsWith('-')) {
           flags[key] = next
           i++
         } else {
@@ -44,7 +61,7 @@ function parseFlags(argv: string[]): {
     } else if (arg.startsWith('-') && arg.length === 2) {
       const key = arg.slice(1)
       const next = argv[i + 1]
-      if (next && !next.startsWith('-')) {
+      if (!BOOLEAN_FLAGS.has(key) && next && !next.startsWith('-')) {
         flags[key] = next
         i++
       } else {
